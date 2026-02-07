@@ -19,18 +19,6 @@ INDEX_CONFIGS = {
         "display_name": "나스닥",
         "emoji": "\U0001f7e2",
     },
-    "SP500": {
-        "ticker": "^GSPC",
-        "fdr_candidates": ["^GSPC", "SPX", "US500"],
-        "display_name": "S&P500",
-        "emoji": "\U0001f535",
-    },
-    "DOW": {
-        "ticker": "^DJI",
-        "fdr_candidates": ["^DJI", "DJI"],
-        "display_name": "다우존스",
-        "emoji": "\U0001f7e1",
-    },
 }
 
 # ==================== Data Collection ====================
@@ -57,7 +45,7 @@ BASE_PRICE_COLUMNS = {
 
 # ==================== Target Variable ====================
 TARGET_LOOKAHEAD_DAYS = 20
-TARGET_UP_THRESHOLD = 1.03   # 3% rise
+TARGET_UP_THRESHOLD = 1.03   # 3% rise (suited for NASDAQ volatility)
 TARGET_DOWN_THRESHOLD = 0.97  # 3% drop
 
 # ==================== Model ====================
