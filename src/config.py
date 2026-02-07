@@ -45,8 +45,8 @@ BASE_PRICE_COLUMNS = {
 
 # ==================== Target Variable ====================
 TARGET_LOOKAHEAD_DAYS = 20
-TARGET_UP_THRESHOLD = 1.03   # 3% rise (suited for NASDAQ volatility)
-TARGET_DOWN_THRESHOLD = 0.97  # 3% drop
+TARGET_UP_THRESHOLD = 1.0    # any positive return (price went up)
+TARGET_DOWN_THRESHOLD = 1.0  # any negative return (price went down)
 
 # ==================== Model ====================
 LGBM_PARAMS = {

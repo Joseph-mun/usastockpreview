@@ -123,8 +123,10 @@ def build_target(df: pd.DataFrame) -> pd.DataFrame:
     spy["after"] = close.shift(-TARGET_LOOKAHEAD_DAYS)
 
     # Binary targets
-    spy["Target"] = np.where(spy["after2"] >= TARGET_UP_THRESHOLD * close, 1, 0)
-    spy["TargetDown"] = np.where(spy["after2_low"] <= TARGET_DOWN_THRESHOLD * close, 1, 0)
+    # Target: will price be higher in 20 trading days? (uses 'after', not 'after2')
+    # With TARGET_UP_THRESHOLD=1.0, Target=1 means price went up (any positive return)
+    spy["Target"] = np.where(spy["after"] > TARGET_UP_THRESHOLD * close, 1, 0)
+    spy["TargetDown"] = np.where(spy["after2_low"] < TARGET_DOWN_THRESHOLD * close, 1, 0)
 
     # Return rate
     spy["suik_rate"] = 100 * (spy["after"] - close) / close
