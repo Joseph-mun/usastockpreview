@@ -5,11 +5,13 @@ import sys
 import time
 from datetime import datetime
 
-from src.config import INDEX_CONFIGS, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+from src.config import INDEX_CONFIGS, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, META_LEARNER_ENABLED
 from src.data.collectors import get_index_data, SMACollector
 from src.data.features import DatasetBuilder
 from src.data.cache import SMACache
 from src.models.predictor import IndexPredictor
+from src.models.meta_learner import MetaLearner
+from src.strategy.allocation import get_allocation, check_rebalance
 from src.notification.telegram_bot import TelegramNotifier
 from src.notification.formatters import (
     format_daily_summary,
@@ -23,9 +25,10 @@ def run_daily_prediction(verbose: bool = True):
     Daily prediction pipeline:
     1. Load pre-trained models
     2. Load SMA cache (from weekly training)
-    3. Fetch today's data (index prices, VIX, bonds)
-    4. Build features and predict
-    5. Send results via Telegram
+    3. Fetch today's data (index prices, VIX, bonds), build features, predict
+    4. Portfolio allocation + Meta Learner
+    5. Generate Telegram messages
+    6. Send via Telegram
     """
     start_time = time.time()
 
@@ -34,7 +37,7 @@ def run_daily_prediction(verbose: bool = True):
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
     # ── Step 1: Load models ──
-    log("Step 1/5: 모델 로드")
+    log("Step 1/6: 모델 로드")
     predictor = IndexPredictor()
     loaded = predictor.load_models()
     if not loaded:
@@ -43,7 +46,7 @@ def run_daily_prediction(verbose: bool = True):
     log(f"  로드 완료: {loaded}")
 
     # ── Step 2: Load SMA cache ──
-    log("Step 2/5: SMA 캐시 로드")
+    log("Step 2/6: SMA 캐시 로드")
     cache = SMACache()
     raw_sma, sma_meta = cache.load()
 
@@ -57,7 +60,7 @@ def run_daily_prediction(verbose: bool = True):
         log("  WARNING: SMA 캐시 없음 - SMA 비율은 기본값(0.5) 사용")
 
     # ── Step 3-4: Build features and predict for each index ──
-    log("Step 3/5: 데이터 수집 + 피처 생성 + 예측")
+    log("Step 3/6: 데이터 수집 + 피처 생성 + 예측")
     builder = DatasetBuilder(sma_ratios=sma_ratios)
 
     predictions = {}
@@ -121,8 +124,57 @@ def run_daily_prediction(verbose: bool = True):
         log("ERROR: 예측 결과가 없습니다.")
         sys.exit(1)
 
+    # ── Step 4: Allocation + Meta Learner ──
+    log("Step 4/6: 포트폴리오 배분 계산")
+
+    # Use NASDAQ probability as primary signal for allocation
+    primary_index = "NASDAQ"
+    primary_prob = predictions.get(primary_index, 0.5)
+
+    # Meta Learner: adjust probability with incremental learning
+    meta_learner = None
+    if META_LEARNER_ENABLED:
+        try:
+            meta_learner = MetaLearner()
+            meta_learner.load()
+
+            # Build meta features from recent history
+            recent_probs = []
+            recent_actuals = []
+            nasdaq_hist = prob_histories.get(primary_index)
+            if nasdaq_hist is not None and len(nasdaq_hist) >= 6:
+                recent_probs = nasdaq_hist["Probability"].iloc[-6:-1].tolist()
+
+            rsi_val = current_indicators.get("rsi", 50.0)
+            meta_features = meta_learner.build_features(
+                lgbm_prob=primary_prob,
+                recent_probs=recent_probs,
+                recent_actuals=recent_actuals,
+                rsi=rsi_val,
+            )
+            adjusted_prob = meta_learner.predict(meta_features)
+            log(f"  Meta Learner: {primary_prob*100:.1f}% -> {adjusted_prob*100:.1f}%")
+            primary_prob = adjusted_prob
+        except Exception as e:
+            log(f"  Meta Learner 오류 (기본 확률 사용): {e}")
+
+    # Compute allocation
+    allocation = get_allocation(primary_prob)
+
+    # Check rebalance (compare with previous day)
+    rebalance_info = None
+    prev_prob = prev_predictions.get(primary_index)
+    if prev_prob is not None:
+        prev_alloc = get_allocation(prev_prob)
+        rebalance_info = check_rebalance(primary_prob, prev_prob, prev_alloc.tier_label)
+
+    log(f"  Tier: {allocation.tier_label} | TQQQ: {allocation.tqqq_weight*100:.0f}% | SPY: {allocation.spy_weight*100:.0f}% | Cash: {allocation.cash_weight*100:.0f}%")
+    if rebalance_info:
+        rebal, reason = rebalance_info
+        log(f"  Rebalance: {'YES' if rebal else 'NO'} ({reason})")
+
     # ── Step 5: Send via Telegram ──
-    log("Step 4/5: Telegram 메시지 생성")
+    log("Step 5/6: Telegram 메시지 생성")
 
     # Summary text
     summary = format_daily_summary(
@@ -130,6 +182,8 @@ def run_daily_prediction(verbose: bool = True):
         prices=current_prices,
         prev_predictions=prev_predictions,
         indicators=current_indicators,
+        allocation=allocation,
+        rebalance_info=rebalance_info,
     )
 
     # Chart image
@@ -151,7 +205,7 @@ def run_daily_prediction(verbose: bool = True):
     except Exception as e:
         log(f"  5일 테이블 생성 실패: {e}")
 
-    log("Step 5/5: Telegram 발송")
+    log("Step 6/6: Telegram 발송")
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         notifier = TelegramNotifier()
         notifier.send_prediction_report(

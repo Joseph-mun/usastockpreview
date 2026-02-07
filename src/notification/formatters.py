@@ -13,6 +13,7 @@ import pandas as pd
 
 from src.config import INDEX_CONFIGS, SIGNAL_THRESHOLDS
 from src.models.predictor import IndexPredictor
+from src.strategy.allocation import AllocationResult
 
 
 # ==================== Korean day name ====================
@@ -30,6 +31,8 @@ def format_daily_summary(
     prices: dict[str, float],
     prev_predictions: dict[str, float] = None,
     indicators: dict = None,
+    allocation: AllocationResult = None,
+    rebalance_info: tuple[bool, str] = None,
 ) -> str:
     """
     Format the main daily summary message (HTML).
@@ -37,6 +40,8 @@ def format_daily_summary(
     prices: {"NASDAQ": 18456.23, ...}
     prev_predictions: yesterday's predictions for delta calculation
     indicators: {"vix": 16.42, "rsi": 58.3, "sma50_ratio": 0.682}
+    allocation: AllocationResult from strategy
+    rebalance_info: (bool, reason) from check_rebalance
     """
     now = datetime.now()
     date_str = now.strftime("%Y-%m-%d")
@@ -67,6 +72,23 @@ def format_daily_summary(
         ticker = cfg["ticker"]
         lines.append(f"<b>{display} ({ticker})</b> {price:,.2f}")
         lines.append(f"  상승확률: <b>{prob*100:.1f}%</b>{delta_str} {emoji} {signal_text}")
+        lines.append("")
+
+    # Portfolio Allocation
+    if allocation:
+        lines.append("\U0001f4ca <b>Portfolio Allocation</b>")
+        lines.append(f"  Tier: <b>{allocation.tier_label}</b>")
+        lines.append(
+            f"  TQQQ: {allocation.tqqq_weight*100:.0f}% | "
+            f"SPY: {allocation.spy_weight*100:.0f}% | "
+            f"Cash: {allocation.cash_weight*100:.0f}%"
+        )
+        if rebalance_info:
+            rebal, reason = rebalance_info
+            if rebal:
+                lines.append(f"  \u26a1 Rebalance: <b>YES</b> ({reason})")
+            else:
+                lines.append(f"  Rebalance: NO ({reason})")
         lines.append("")
 
     # Indicators

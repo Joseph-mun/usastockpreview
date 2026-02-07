@@ -43,10 +43,21 @@ BASE_PRICE_COLUMNS = {
     "Open", "High", "Low", "Close", "Adj Close", "Volume", "Change",
 }
 
+# ==================== Training Window ====================
+TRAIN_WINDOW_YEARS = 3  # Use only recent N years for training
+
 # ==================== Target Variable ====================
-TARGET_LOOKAHEAD_DAYS = 20
+TARGET_LOOKAHEAD_DAYS = 5    # 5-day lookahead (weekly rebalancing)
 TARGET_UP_THRESHOLD = 1.0    # any positive return (price went up)
 TARGET_DOWN_THRESHOLD = 1.0  # any negative return (price went down)
+
+# ==================== Calibration ====================
+CALIBRATION_ENABLED = True
+CALIBRATION_METHOD = "isotonic"  # "platt" or "isotonic"
+
+# ==================== Feature Selection ====================
+FEATURE_SELECTION_ENABLED = True
+FEATURE_IMPORTANCE_TOP_N = 30
 
 # ==================== Model ====================
 LGBM_PARAMS = {
@@ -64,8 +75,13 @@ LGBM_PARAMS = {
     "n_jobs": -1,
 }
 
-CV_N_SPLITS = 5
+CV_N_SPLITS = 3   # reduced from 5 (3-year window = ~750 samples)
 CV_GAP = TARGET_LOOKAHEAD_DAYS  # gap between train/test to prevent leakage
+
+# ==================== Meta Learner (Incremental Deep Learning) ====================
+META_LEARNER_ENABLED = True
+META_LEARNER_HIDDEN = (32, 16)
+META_LEARNER_LR = 0.001
 
 # ==================== GitHub Release ====================
 MODEL_RELEASE_TAG = "model-latest"
@@ -82,3 +98,15 @@ SIGNAL_THRESHOLDS = {
     "neutral": 0.40,
     # below neutral = sell
 }
+
+# ==================== TQQQ/SPY Allocation ====================
+ALLOCATION_TIERS = [
+    # (min_prob, max_prob, tqqq_weight, spy_weight, cash_weight, label)
+    (0.80, 1.01, 0.60, 0.40, 0.00, "Aggressive"),
+    (0.70, 0.80, 0.40, 0.50, 0.10, "Growth"),
+    (0.60, 0.70, 0.20, 0.60, 0.20, "Moderate"),
+    (0.50, 0.60, 0.00, 0.60, 0.40, "Cautious"),
+    (0.00, 0.50, 0.00, 0.30, 0.70, "Defensive"),
+]
+
+REBALANCE_HYSTERESIS = 0.05  # 5%p move required to trigger rebalance

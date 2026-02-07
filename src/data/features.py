@@ -4,10 +4,12 @@
 import numpy as np
 import pandas as pd
 
+from datetime import datetime, timedelta
+
 from src.config import (
     DATA_START_DATE, MA_WINDOWS, LAG_PERIODS, ROLLING_WINDOWS,
     TARGET_LOOKAHEAD_DAYS, TARGET_UP_THRESHOLD, TARGET_DOWN_THRESHOLD,
-    LEAK_COLUMNS, BASE_PRICE_COLUMNS,
+    LEAK_COLUMNS, BASE_PRICE_COLUMNS, TRAIN_WINDOW_YEARS,
 )
 from src.data.collectors import (
     get_index_data, get_bond_data, get_vix_data, get_yield_spread,
@@ -299,6 +301,15 @@ class DatasetBuilder:
         # Build feature matrix (no leakage)
         X = _build_feature_matrix(spy)
         y = spy["Target"] if not for_prediction else None
+
+        # Apply training window filter (use only recent N years for training)
+        if not for_prediction and TRAIN_WINDOW_YEARS:
+            cutoff = datetime.now() - timedelta(days=TRAIN_WINDOW_YEARS * 365)
+            mask = X.index >= cutoff
+            X = X[mask]
+            if y is not None:
+                y = y[mask]
+            spy = spy.loc[X.index]
 
         return X, spy, y
 

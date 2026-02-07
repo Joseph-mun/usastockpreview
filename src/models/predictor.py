@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Model prediction: load models and compute probabilities."""
+"""Model prediction: load models, apply calibration, compute probabilities."""
 
 import json
 from pathlib import Path
@@ -12,19 +12,18 @@ from src.config import MODEL_DIR, INDEX_CONFIGS, SIGNAL_THRESHOLDS
 
 
 class IndexPredictor:
-    """Load trained models and predict probabilities for all indices."""
+    """Load trained models and predict calibrated probabilities."""
 
     def __init__(self, model_dir: str = None):
         self.model_dir = Path(model_dir) if model_dir else MODEL_DIR
         self.models: dict[str, object] = {}
         self.feature_columns: dict[str, list[str]] = {}
         self.metadata: dict[str, dict] = {}
+        self.calibrators: dict[str, object] = {}
+        self.calibration_methods: dict[str, str] = {}
 
     def load_models(self) -> list[str]:
-        """
-        Load all available index models from model_dir.
-        Returns list of loaded index names.
-        """
+        """Load all available index models from model_dir."""
         loaded = []
         for index_name in INDEX_CONFIGS:
             name_lower = index_name.lower()
@@ -37,6 +36,8 @@ class IndexPredictor:
             data = joblib.load(model_path)
             self.models[index_name] = data["model"]
             self.feature_columns[index_name] = data.get("feature_columns", [])
+            self.calibrators[index_name] = data.get("calibrator", None)
+            self.calibration_methods[index_name] = data.get("calibration_method", None)
 
             if meta_path.exists():
                 with open(meta_path, "r", encoding="utf-8") as f:
@@ -46,11 +47,32 @@ class IndexPredictor:
 
         return loaded
 
+    def _calibrate(self, index_name: str, raw_prob: float) -> float:
+        """Apply calibration to raw probability."""
+        calibrator = self.calibrators.get(index_name)
+        if calibrator is None:
+            return raw_prob
+
+        method = self.calibration_methods.get(index_name)
+        if method == "isotonic":
+            return float(calibrator.predict([raw_prob])[0])
+        else:
+            return float(calibrator.predict_proba([[raw_prob]])[0][1])
+
+    def _calibrate_array(self, index_name: str, raw_probs: np.ndarray) -> np.ndarray:
+        """Apply calibration to array of probabilities."""
+        calibrator = self.calibrators.get(index_name)
+        if calibrator is None:
+            return raw_probs
+
+        method = self.calibration_methods.get(index_name)
+        if method == "isotonic":
+            return calibrator.predict(raw_probs)
+        else:
+            return calibrator.predict_proba(raw_probs.reshape(-1, 1))[:, 1]
+
     def predict_current(self, index_name: str, features: pd.Series) -> float | None:
-        """
-        Predict current probability for a single index.
-        Returns probability of class 1 (rise), or None if model not loaded.
-        """
+        """Predict calibrated probability for a single index."""
         if index_name not in self.models:
             return None
 
@@ -63,8 +85,8 @@ class IndexPredictor:
         else:
             row = features.values.reshape(1, -1)
 
-        proba = model.predict_proba(row)[0]
-        return float(proba[1])
+        raw_prob = float(model.predict_proba(row)[0][1])
+        return self._calibrate(index_name, raw_prob)
 
     def predict_history(
         self,
@@ -72,10 +94,7 @@ class IndexPredictor:
         X: pd.DataFrame,
         days: int = 500,
     ) -> pd.DataFrame | None:
-        """
-        Compute probability history (vectorized) for the last N days.
-        Returns DataFrame with 'Probability' column and DatetimeIndex.
-        """
+        """Compute calibrated probability history for the last N days."""
         if index_name not in self.models:
             return None
 
@@ -90,17 +109,15 @@ class IndexPredictor:
         if cols:
             X_slice = X_slice.reindex(columns=cols).fillna(0)
 
-        proba = model.predict_proba(X_slice.values)[:, 1]
-        out = pd.DataFrame({"Probability": proba}, index=X_slice.index)
+        raw_probs = model.predict_proba(X_slice.values)[:, 1]
+        cal_probs = self._calibrate_array(index_name, raw_probs)
+
+        out = pd.DataFrame({"Probability": cal_probs}, index=X_slice.index)
         out.index.name = "Date"
         return out.sort_index()
 
     def predict_all(self, feature_data: dict[str, pd.Series]) -> dict[str, float]:
-        """
-        Predict current probability for all loaded indices.
-        feature_data: {"NASDAQ": Series, "SP500": Series, "DOW": Series}
-        Returns: {"NASDAQ": 0.72, "SP500": 0.65, "DOW": 0.58}
-        """
+        """Predict calibrated probability for all loaded indices."""
         results = {}
         for index_name, features in feature_data.items():
             prob = self.predict_current(index_name, features)
@@ -110,10 +127,7 @@ class IndexPredictor:
 
     @staticmethod
     def get_signal(probability: float) -> tuple[str, str]:
-        """
-        Convert probability to signal text and emoji.
-        Returns (signal_text, emoji).
-        """
+        """Convert probability to signal text and emoji."""
         if probability >= SIGNAL_THRESHOLDS["strong_buy"]:
             return "Strong Buy", "\U0001f7e2"
         elif probability >= SIGNAL_THRESHOLDS["buy"]:

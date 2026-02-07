@@ -168,6 +168,21 @@ def get_index_data(ticker: str, start_date: str = DATA_START_DATE, end_date=None
     raise RuntimeError(f"Failed to fetch index data: {candidates}, error={last_err}")
 
 
+# ==================== SPY ETF Data ====================
+
+def get_spy_data(start_date: str = DATA_START_DATE, end_date=None) -> pd.DataFrame:
+    """Fetch SPY ETF price data for portfolio backtest."""
+    if end_date is None:
+        end_date = datetime.now().date() + timedelta(days=1)
+
+    df = fdr.DataReader("SPY", start_date, end_date)
+    if df is None or df.empty:
+        raise RuntimeError("Failed to fetch SPY data")
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+    return df
+
+
 # ==================== SMA Data Collection ====================
 # Adapted from stock_analysis_refactored.py L256-356
 
