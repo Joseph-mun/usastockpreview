@@ -57,23 +57,29 @@ def run_backtest(backtest_days: int = 30, verbose: bool = True):
     log(f"   기간: {spy.index[0].strftime('%Y-%m-%d')} ~ {spy.index[-1].strftime('%Y-%m-%d')}")
     log(f"   Target=1 비율: {y.mean():.3f}")
 
-    # 3. Train model locally (avoids Python version pickle issues)
-    log("3. 로컬 모델 학습...")
-    trainer = ModelTrainer(index_name)
-    result = trainer.train(X, y, status_callback=lambda msg: log(f"   {msg}"))
-    model = result["model"]
-    feature_columns = X.columns.tolist()
-    log(f"   CV accuracy: {result['metrics']['cv_accuracy_mean']:.4f}")
+    # 3. Walk-forward backtest: train on data BEFORE test period, predict on test period
+    n_days = min(backtest_days, len(X) - 100)  # ensure enough training data
+    split_idx = len(X) - n_days
 
-    # 4. Predict for last N verifiable days
-    n_days = min(backtest_days, len(X))
-    log(f"\n4. 최근 {n_days}일 백테스트 실행...")
-
-    X_test = X.iloc[-n_days:]
-    y_test = y.iloc[-n_days:]
+    X_train = X.iloc[:split_idx]
+    y_train = y.iloc[:split_idx]
+    X_test = X.iloc[split_idx:]
+    y_test = y.iloc[split_idx:]
     spy_test = spy.loc[X_test.index]
 
-    # Vectorized prediction
+    log(f"3. Walk-forward 백테스트...")
+    log(f"   학습 데이터: {len(X_train)} samples ({X_train.index[0].strftime('%Y-%m-%d')} ~ {X_train.index[-1].strftime('%Y-%m-%d')})")
+    log(f"   테스트 데이터: {len(X_test)} samples ({X_test.index[0].strftime('%Y-%m-%d')} ~ {X_test.index[-1].strftime('%Y-%m-%d')})")
+
+    # Train ONLY on data before the test period
+    import lightgbm as lgb
+    from src.config import LGBM_PARAMS
+    model = lgb.LGBMClassifier(**LGBM_PARAMS)
+    model.fit(X_train.values, y_train.values)
+    log(f"   학습 완료 (테스트 기간 데이터는 학습에서 제외)")
+
+    # Predict on held-out test period
+    log(f"\n4. 최근 {len(X_test)}일 예측...")
     proba = model.predict_proba(X_test.values)[:, 1]
     prob_df = pd.DataFrame({"Probability": proba}, index=X_test.index)
 
