@@ -1,0 +1,54 @@
+name: Backtest Report
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Number of trading days to backtest'
+        required: false
+        default: '30'
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run backtest
+        run: python backtest.py --days ${{ github.event.inputs.days || '30' }}
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-report
+          path: backtest_report.html
+
+      - name: Send report via Telegram
+        if: ${{ env.TELEGRAM_TOKEN != '' }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python -c "
+          import requests, os
+          token = os.environ['TELEGRAM_TOKEN']
+          chat_id = os.environ['TELEGRAM_CHAT_ID']
+          url = f'https://api.telegram.org/bot{token}/sendDocument'
+          with open('backtest_report.html', 'rb') as f:
+              requests.post(url, data={'chat_id': chat_id, 'caption': 'NASDAQ Backtest Report'}, files={'document': f})
+          "
