@@ -44,10 +44,10 @@ BASE_PRICE_COLUMNS = {
 }
 
 # ==================== Training Window ====================
-TRAIN_WINDOW_YEARS = 3  # Use only recent N years for training
+TRAIN_WINDOW_YEARS = None  # Use all available data (restored from 3)
 
 # ==================== Target Variable ====================
-TARGET_LOOKAHEAD_DAYS = 5    # 5-day lookahead (weekly rebalancing)
+TARGET_LOOKAHEAD_DAYS = 20   # 20-day lookahead (restored from 5)
 TARGET_UP_THRESHOLD = 1.0    # any positive return (price went up)
 TARGET_DOWN_THRESHOLD = 1.0  # any negative return (price went down)
 
@@ -75,7 +75,7 @@ LGBM_PARAMS = {
     "n_jobs": -1,
 }
 
-CV_N_SPLITS = 3   # reduced from 5 (3-year window = ~750 samples)
+CV_N_SPLITS = 5   # restored from 3 (full data = ~2500+ samples)
 CV_GAP = TARGET_LOOKAHEAD_DAYS  # gap between train/test to prevent leakage
 
 # ==================== Meta Learner (Incremental Deep Learning) ====================

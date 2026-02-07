@@ -103,6 +103,119 @@ def calculate_momentum(df: pd.DataFrame, periods: list[int] = None) -> pd.DataFr
     return result
 
 
+# ==================== Advanced Indicators ====================
+
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Calculate Average True Range (volatility measure)."""
+    high = df["High"]
+    low = df["Low"]
+    close = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=period, adjust=False).mean()
+    return pd.Series(atr, name="atr", index=df.index)
+
+
+def calculate_stochastic(df: pd.DataFrame, k_period: int = 14, d_period: int = 3) -> pd.DataFrame:
+    """Calculate Stochastic Oscillator (%K, %D)."""
+    high = df["High"]
+    low = df["Low"]
+    close = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
+    lowest_low = low.rolling(window=k_period).min()
+    highest_high = high.rolling(window=k_period).max()
+    stoch_k = 100 * (close - lowest_low) / (highest_high - lowest_low)
+    stoch_d = stoch_k.rolling(window=d_period).mean()
+    return pd.DataFrame({"stoch_k": stoch_k, "stoch_d": stoch_d}, index=df.index)
+
+
+def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Calculate Average Directional Index (trend strength)."""
+    high = df["High"]
+    low = df["Low"]
+    close = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=period, adjust=False).mean()
+    plus_di = 100 * plus_dm.ewm(span=period, adjust=False).mean() / atr
+    minus_di = 100 * minus_dm.ewm(span=period, adjust=False).mean() / atr
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(span=period, adjust=False).mean()
+    return pd.Series(adx, name="adx", index=df.index)
+
+
+def calculate_obv(df: pd.DataFrame) -> pd.Series:
+    """Calculate On-Balance Volume."""
+    close = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
+    volume = df["Volume"]
+    direction = np.where(close > close.shift(1), 1, np.where(close < close.shift(1), -1, 0))
+    obv = (volume * direction).cumsum()
+    return pd.Series(obv, name="obv", index=df.index)
+
+
+def calculate_roc(df: pd.DataFrame, periods: list[int] = None) -> pd.DataFrame:
+    """Calculate Rate of Change."""
+    if periods is None:
+        periods = [5, 10, 20]
+    close = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
+    result = pd.DataFrame(index=df.index)
+    for p in periods:
+        result[f"roc_{p}d"] = 100 * (close - close.shift(p)) / close.shift(p)
+    return result
+
+
+def calculate_volatility(df: pd.DataFrame, windows: list[int] = None) -> pd.DataFrame:
+    """Calculate historical volatility (annualized std of log returns)."""
+    if windows is None:
+        windows = [10, 20, 60]
+    close = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
+    log_ret = np.log(close / close.shift(1))
+    result = pd.DataFrame(index=df.index)
+    for w in windows:
+        result[f"hvol_{w}d"] = log_ret.rolling(w).std() * np.sqrt(252)
+    return result
+
+
+def calculate_cross_asset_features(spy_df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate cross-asset derived features from already-joined data."""
+    result = pd.DataFrame(index=spy_df.index)
+    close = spy_df["Adj Close"] if "Adj Close" in spy_df.columns else spy_df["Close"]
+
+    # VIX / Price ratio (fear relative to market level)
+    if "vix" in spy_df.columns:
+        result["vix_price_ratio"] = spy_df["vix"] / (close / close.iloc[0] * 100)
+        # VIX term structure proxy: VIX level vs its 20d MA
+        vix_ma20 = spy_df["vix"].rolling(20).mean()
+        result["vix_vs_ma20"] = spy_df["vix"] / vix_ma20.replace(0, np.nan)
+
+    # Bond-equity signal: yield spread change vs price momentum
+    if "T10Y2Y" in spy_df.columns:
+        result["yield_spread_chg5"] = spy_df["T10Y2Y"] - spy_df["T10Y2Y"].shift(5)
+        result["yield_spread_chg20"] = spy_df["T10Y2Y"] - spy_df["T10Y2Y"].shift(20)
+
+    return result
+
+
+def calculate_mean_reversion(df: pd.DataFrame, windows: list[int] = None) -> pd.DataFrame:
+    """Calculate mean-reversion Z-score signals."""
+    if windows is None:
+        windows = [20, 60]
+    close = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
+    result = pd.DataFrame(index=df.index)
+    for w in windows:
+        ma = close.rolling(w).mean()
+        std = close.rolling(w).std()
+        result[f"zscore_{w}d"] = (close - ma) / std.replace(0, np.nan)
+    return result
+
+
 # ==================== Target Variable ====================
 
 def build_target(df: pd.DataFrame) -> pd.DataFrame:
@@ -264,33 +377,103 @@ class DatasetBuilder:
             for c in bb_df.columns:
                 spy[c] = spy[c].ffill().bfill()
 
-        # 9. Momentum (NEW)
+        # 9. Momentum
         mom_df = calculate_momentum(index_df)
         spy = spy.join(mom_df, how=join_how)
         if for_prediction:
             for c in mom_df.columns:
                 spy[c] = spy[c].ffill().bfill()
 
-        # 10. Lag features (NEW) - for key indicators
-        for col in ["rsi", "vix", "Change20day"]:
+        # 10. ATR (Average True Range - volatility)
+        atr = calculate_atr(index_df)
+        spy["atr"] = atr.reindex(spy.index)
+        # Normalize ATR by price for comparability
+        close_for_norm = spy["Adj Close"] if "Adj Close" in spy.columns else spy["Close"]
+        spy["atr_pct"] = spy["atr"] / close_for_norm
+        if for_prediction:
+            spy["atr"] = spy["atr"].ffill().bfill()
+            spy["atr_pct"] = spy["atr_pct"].ffill().bfill()
+
+        # 11. Stochastic Oscillator
+        stoch_df = calculate_stochastic(index_df)
+        spy = spy.join(stoch_df, how=join_how)
+        if for_prediction:
+            for c in stoch_df.columns:
+                spy[c] = spy[c].ffill().bfill()
+
+        # 12. ADX (trend strength)
+        adx = calculate_adx(index_df)
+        spy["adx"] = adx.reindex(spy.index)
+        if for_prediction:
+            spy["adx"] = spy["adx"].ffill().bfill()
+
+        # 13. OBV (On-Balance Volume)
+        obv = calculate_obv(index_df)
+        # Normalize OBV as rate of change (raw OBV is unbounded)
+        spy["obv_roc5"] = obv.pct_change(5).reindex(spy.index)
+        spy["obv_roc20"] = obv.pct_change(20).reindex(spy.index)
+        if for_prediction:
+            spy["obv_roc5"] = spy["obv_roc5"].ffill().bfill()
+            spy["obv_roc20"] = spy["obv_roc20"].ffill().bfill()
+
+        # 14. Rate of Change
+        roc_df = calculate_roc(index_df)
+        spy = spy.join(roc_df, how=join_how)
+        if for_prediction:
+            for c in roc_df.columns:
+                spy[c] = spy[c].ffill().bfill()
+
+        # 15. Historical Volatility
+        vol_df = calculate_volatility(index_df)
+        spy = spy.join(vol_df, how=join_how)
+        if for_prediction:
+            for c in vol_df.columns:
+                spy[c] = spy[c].ffill().bfill()
+
+        # 16. Mean Reversion Z-score
+        zs_df = calculate_mean_reversion(index_df)
+        spy = spy.join(zs_df, how=join_how)
+        if for_prediction:
+            for c in zs_df.columns:
+                spy[c] = spy[c].ffill().bfill()
+
+        # 17. Cross-asset features (uses already-joined VIX, bond data)
+        cross_df = calculate_cross_asset_features(spy)
+        for c in cross_df.columns:
+            spy[c] = cross_df[c]
+        if for_prediction:
+            for c in cross_df.columns:
+                spy[c] = spy[c].ffill().bfill()
+
+        # 18. Lag features - for key indicators
+        for col in ["rsi", "vix", "Change20day", "adx", "atr_pct"]:
             if col in spy.columns:
                 lag_df = calculate_lag_features(spy[col], col)
                 for lc in lag_df.columns:
                     spy[lc] = lag_df[lc]
 
-        # 11. Rolling stats (NEW) - for returns
+        # 19. Rolling stats - for returns
         close = spy["Adj Close"] if "Adj Close" in spy.columns else spy["Close"]
         returns = close.pct_change()
         roll_df = calculate_rolling_stats(returns, "ret")
         for rc in roll_df.columns:
             spy[rc] = roll_df[rc]
 
-        # 12. SMA ratio lag features (NEW)
+        # 20. SMA ratio lag features
         for col in ["ratio_sma15", "ratio_sma30", "ratio_sma50"]:
             if col in spy.columns:
                 lag_df = calculate_lag_features(spy[col], col, lags=[1, 5, 10])
                 for lc in lag_df.columns:
                     spy[lc] = lag_df[lc]
+
+        # 21. Volume features (rate of change, relative volume)
+        if "Volume" in spy.columns:
+            vol_series = spy["Volume"].astype(float)
+            spy["vol_roc5"] = vol_series / vol_series.rolling(5).mean()
+            spy["vol_roc20"] = vol_series / vol_series.rolling(20).mean()
+            if for_prediction:
+                spy["vol_roc5"] = spy["vol_roc5"].ffill().bfill()
+                spy["vol_roc20"] = spy["vol_roc20"].ffill().bfill()
 
         # Final: fill remaining NaN for prediction
         if for_prediction:
