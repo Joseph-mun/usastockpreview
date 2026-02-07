@@ -53,7 +53,7 @@ TARGET_DOWN_THRESHOLD = 1.0  # any negative return (price went down)
 
 # ==================== Calibration ====================
 CALIBRATION_ENABLED = True
-CALIBRATION_METHOD = "isotonic"  # "platt" or "isotonic"
+CALIBRATION_METHOD = "platt"  # "platt" (smooth sigmoid) or "isotonic" (step function)
 
 # ==================== Feature Selection ====================
 FEATURE_SELECTION_ENABLED = True
@@ -92,10 +92,12 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # ==================== Signal Thresholds ====================
+# Base rate ~67% (market goes up ~67% of 20-day periods)
+# Thresholds set relative to base rate for meaningful signal distribution
 SIGNAL_THRESHOLDS = {
-    "strong_buy": 0.70,
-    "buy": 0.60,
-    "neutral": 0.40,
+    "strong_buy": 0.80,   # significantly above base rate
+    "buy": 0.70,          # above base rate
+    "neutral": 0.55,      # around/below base rate
     # below neutral = sell
 }
 
