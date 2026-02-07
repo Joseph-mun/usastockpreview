@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.venv/
+venv/
+
+# Model artifacts (managed via GitHub Releases)
+models/*.joblib
+models/*_meta.json
+
+# SMA cache (managed via GitHub Releases)
+data/sma_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Legacy model
+*.pkl

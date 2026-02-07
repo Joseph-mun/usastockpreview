@@ -1,0 +1,96 @@
+# -*- coding: utf-8 -*-
+"""Global configuration for US Market Predictor."""
+
+import os
+from pathlib import Path
+
+# ==================== Paths ====================
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
+MODEL_DIR = DATA_DIR / "models"
+SMA_CACHE_DIR = DATA_DIR / "sma_cache"
+LOG_DIR = DATA_DIR / "logs"
+
+# ==================== Index Definitions ====================
+INDEX_CONFIGS = {
+    "NASDAQ": {
+        "ticker": "IXIC",
+        "fdr_candidates": ["IXIC", "^IXIC"],
+        "display_name": "나스닥",
+        "emoji": "\U0001f7e2",
+    },
+    "SP500": {
+        "ticker": "US500",
+        "fdr_candidates": ["US500", "SPX", "^GSPC"],
+        "display_name": "S&P500",
+        "emoji": "\U0001f535",
+    },
+    "DOW": {
+        "ticker": "DJI",
+        "fdr_candidates": ["DJI", "^DJI"],
+        "display_name": "다우존스",
+        "emoji": "\U0001f7e1",
+    },
+}
+
+# ==================== Data Collection ====================
+SMA_WINDOWS = [15, 30, 50]
+DATA_START_DATE = "2015-01-01"
+BOND_CODES = ["DGS2", "DGS10", "DGS30"]
+BOND_CHANGE_PERIODS = [5, 20, 60]
+VIX_CHANGE_PERIODS = [1, 5, 10]
+MA_WINDOWS = [5, 20, 60, 120, 200]
+
+# ==================== Feature Engineering ====================
+LAG_PERIODS = [1, 2, 3, 5, 10]
+ROLLING_WINDOWS = [5, 10, 20, 60]
+
+# Columns to exclude from features (leakage prevention)
+LEAK_COLUMNS = {
+    "Target", "TargetDown",
+    "after", "after2", "after2_low",
+    "suik_rate",
+}
+BASE_PRICE_COLUMNS = {
+    "Open", "High", "Low", "Close", "Adj Close", "Volume", "Change",
+}
+
+# ==================== Target Variable ====================
+TARGET_LOOKAHEAD_DAYS = 20
+TARGET_UP_THRESHOLD = 1.03   # 3% rise
+TARGET_DOWN_THRESHOLD = 0.97  # 3% drop
+
+# ==================== Model ====================
+LGBM_PARAMS = {
+    "objective": "binary",
+    "boosting_type": "gbdt",
+    "n_estimators": 500,
+    "max_depth": 8,
+    "learning_rate": 0.05,
+    "num_leaves": 63,
+    "min_child_samples": 20,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "random_state": 42,
+    "verbosity": -1,
+    "n_jobs": -1,
+}
+
+CV_N_SPLITS = 5
+CV_GAP = TARGET_LOOKAHEAD_DAYS  # gap between train/test to prevent leakage
+
+# ==================== GitHub Release ====================
+MODEL_RELEASE_TAG = "model-latest"
+SMA_CACHE_RELEASE_TAG = "sma-cache-latest"
+
+# ==================== Telegram ====================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+# ==================== Signal Thresholds ====================
+SIGNAL_THRESHOLDS = {
+    "strong_buy": 0.70,
+    "buy": 0.60,
+    "neutral": 0.40,
+    # below neutral = sell
+}
