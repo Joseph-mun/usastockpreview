@@ -20,14 +20,14 @@ INDEX_CONFIGS = {
         "emoji": "\U0001f7e2",
     },
     "SP500": {
-        "ticker": "US500",
-        "fdr_candidates": ["US500", "SPX", "^GSPC"],
+        "ticker": "^GSPC",
+        "fdr_candidates": ["^GSPC", "SPX", "US500"],
         "display_name": "S&P500",
         "emoji": "\U0001f535",
     },
     "DOW": {
-        "ticker": "DJI",
-        "fdr_candidates": ["DJI", "^DJI"],
+        "ticker": "^DJI",
+        "fdr_candidates": ["^DJI", "DJI"],
         "display_name": "다우존스",
         "emoji": "\U0001f7e1",
     },

@@ -160,11 +160,16 @@ class DatasetBuilder:
         """
         end_date = None  # defaults to today+1 in get_index_data
 
-        # 1. Get index price data
-        spy = get_index_data(index_ticker, start_date, end_date)
-        spy["Close"] = spy["Adj Close"]
-        spy.index = pd.to_datetime(spy.index)
-        spy = spy.sort_index()
+        # 1. Get index price data (SINGLE fetch, reused below)
+        raw_df = get_index_data(index_ticker, start_date, end_date)
+        raw_df.index = pd.to_datetime(raw_df.index)
+        raw_df = raw_df.sort_index()
+
+        spy = raw_df.copy()
+        close_col = "Adj Close" if "Adj Close" in spy.columns else "Close"
+        spy["Close"] = spy[close_col]
+        if "Adj Close" not in spy.columns:
+            spy["Adj Close"] = spy["Close"]
         base_index = spy.index
         join_how = "left" if for_prediction else "inner"
 
@@ -173,10 +178,10 @@ class DatasetBuilder:
         if not for_prediction:
             spy = spy[~spy["after"].isnull()]
 
-        # 3. Change20day (20-day cumulative return)
-        k1 = get_index_data(index_ticker, start_date)
-        k1["Close"] = k1["Adj Close"]
-        k1["Change"] = (k1["Close"] - k1["Close"].shift(1)) / k1["Close"].shift(1)
+        # 3. Change20day (20-day cumulative return) - reuse raw_df
+        k1 = raw_df.copy()
+        k1_close = k1["Adj Close"] if "Adj Close" in k1.columns else k1["Close"]
+        k1["Change"] = k1_close.pct_change()
         k1 = k1[~k1["Change"].isnull()]
         k2 = np.log10(1 + k1["Change"]).rolling(window=20).sum()
         k1["Change20day"] = (pow(10, k2) - 1) * 100
@@ -215,9 +220,8 @@ class DatasetBuilder:
             for c in vix_df.columns:
                 spy[c] = spy[c].ffill().bfill()
 
-        # 7. Technical indicators from index
-        index_df = get_index_data(index_ticker, start_date)
-        index_df.index = pd.to_datetime(index_df.index)
+        # 7. Technical indicators from index (reuse raw_df)
+        index_df = raw_df.copy()
 
         # MACD
         macd_df = calculate_macd(index_df)
