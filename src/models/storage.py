@@ -2,9 +2,12 @@
 """GitHub Release storage for model files and SMA cache."""
 
 import glob
+import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from src.config import MODEL_DIR, SMA_CACHE_DIR
@@ -88,19 +91,11 @@ def download_artifacts(verbose: bool = True):
     result = _run_gh([
         "release", "view", RELEASE_TAG,
         "--json", "assets",
-        "--jq", ".[].name",
     ], check=False)
 
     if result.returncode != 0:
         raise RuntimeError(f"Release '{RELEASE_TAG}' not found. Run training first.")
 
-    # gh release view --json assets returns JSON, but with --jq we get names
-    # Actually we need to parse the JSON properly
-    import json
-    result = _run_gh([
-        "release", "view", RELEASE_TAG,
-        "--json", "assets",
-    ])
     assets = json.loads(result.stdout).get("assets", [])
 
     if not assets:
@@ -113,7 +108,6 @@ def download_artifacts(verbose: bool = True):
             print(f"  {name}")
 
     # Download all assets to a temp dir, then move to correct locations
-    import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         _run_gh([
             "release", "download", RELEASE_TAG,
@@ -128,8 +122,6 @@ def download_artifacts(verbose: bool = True):
             else:
                 dst = MODEL_DIR / fname
 
-            # Move file
-            import shutil
             shutil.copy2(src, dst)
             if verbose:
                 print(f"  Saved: {dst}")
