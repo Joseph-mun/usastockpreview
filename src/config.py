@@ -57,19 +57,21 @@ CALIBRATION_METHOD = "isotonic"  # "platt" (smooth sigmoid) or "isotonic" (step 
 
 # ==================== Feature Selection ====================
 FEATURE_SELECTION_ENABLED = True
-FEATURE_IMPORTANCE_TOP_N = 30
+FEATURE_IMPORTANCE_TOP_N = 35
 
 # ==================== Model ====================
 LGBM_PARAMS = {
     "objective": "binary",
     "boosting_type": "gbdt",
-    "n_estimators": 500,
-    "max_depth": 8,
-    "learning_rate": 0.05,
-    "num_leaves": 63,
-    "min_child_samples": 20,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
+    "n_estimators": 300,
+    "max_depth": 7,
+    "learning_rate": 0.09,
+    "num_leaves": 52,
+    "min_child_samples": 60,
+    "subsample": 0.95,
+    "colsample_bytree": 0.60,
+    "reg_alpha": 0.73,
+    "reg_lambda": 1.43,
     "random_state": 42,
     "verbosity": -1,
     "n_jobs": -1,
