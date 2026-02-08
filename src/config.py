@@ -53,7 +53,7 @@ TARGET_DOWN_THRESHOLD = 1.0  # any negative return (price went down)
 
 # ==================== Calibration ====================
 CALIBRATION_ENABLED = True
-CALIBRATION_METHOD = "platt"  # "platt" (smooth sigmoid) or "isotonic" (step function)
+CALIBRATION_METHOD = "isotonic"  # "platt" (smooth sigmoid) or "isotonic" (step function)
 
 # ==================== Feature Selection ====================
 FEATURE_SELECTION_ENABLED = True
