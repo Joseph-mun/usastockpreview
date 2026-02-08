@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Model training pipeline with LightGBM, calibration, and feature selection."""
+"""Model training pipeline with LightGBM, calibration, and feature selection.
+
+Phase 1 improvements (overfitting reduction):
+  - Calibration: OOF (out-of-fold) predictions from ALL folds instead of last fold only
+  - Early stopping: separate validation split from train data (not test set)
+  - Feature selection: averaged CV importances across all folds
+"""
 
 import json
 from datetime import datetime
@@ -18,6 +24,16 @@ from src.config import (
     CALIBRATION_ENABLED, CALIBRATION_METHOD,
     FEATURE_SELECTION_ENABLED, FEATURE_IMPORTANCE_TOP_N,
 )
+
+# Early stopping validation split ratio (from end of training set)
+_VAL_RATIO = 0.1
+_VAL_MIN_SAMPLES = 20
+
+
+def _split_train_val(train_idx):
+    """Split train indices into pure-train and validation for early stopping."""
+    val_size = max(int(len(train_idx) * _VAL_RATIO), _VAL_MIN_SAMPLES)
+    return train_idx[:-val_size], train_idx[-val_size:]
 
 
 class ModelTrainer:
@@ -39,133 +55,176 @@ class ModelTrainer:
         progress_callback=None,
         status_callback=None,
     ) -> dict:
-        """Train model with TimeSeriesSplit CV, calibration, and feature selection."""
-        if status_callback:
-            status_callback(f"[{self.index_name}] 학습 시작 (데이터: {len(X)} rows, {len(X.columns)} features)")
+        """Train model with TimeSeriesSplit CV, calibration, and feature selection.
 
-        self.feature_columns = X.columns.tolist()
+        Pipeline:
+          1. CV on all features → accuracy scores + averaged feature importances
+          2. Feature selection from averaged importances
+          3. CV on selected features → OOF predictions for calibration
+          4. Fit calibrator on OOF predictions
+          5. Train final model on all data with selected features
+        """
+        if status_callback:
+            status_callback(
+                f"[{self.index_name}] 학습 시작 "
+                f"(데이터: {len(X)} rows, {len(X.columns)} features)"
+            )
+
+        all_feature_columns = X.columns.tolist()
+        self.feature_columns = all_feature_columns
         X_arr = X.values.astype(np.float64)
         y_arr = y.values.astype(int)
 
-        # Time-series cross-validation
         tscv = TimeSeriesSplit(n_splits=CV_N_SPLITS, gap=CV_GAP)
         self.cv_scores = []
         fold_details = []
 
+        need_fs = (
+            FEATURE_SELECTION_ENABLED
+            and len(all_feature_columns) > FEATURE_IMPORTANCE_TOP_N
+        )
+
+        # Total progress steps: phase1 CV + (phase3 CV if fs) + final train
+        total_steps = CV_N_SPLITS + (CV_N_SPLITS if need_fs else 0) + 1
+        step = 0
+
+        # ── Phase 1: CV → accuracy + feature importances ──
+        accumulated_importances = np.zeros(X_arr.shape[1])
+        # If no feature selection, collect OOF here directly
+        oof_probs = None if need_fs else np.full(len(y_arr), np.nan)
+
         for fold, (train_idx, test_idx) in enumerate(tscv.split(X_arr)):
-            X_train, X_test = X_arr[train_idx], X_arr[test_idx]
-            y_train, y_test = y_arr[train_idx], y_arr[test_idx]
+            pure_train_idx, val_idx = _split_train_val(train_idx)
 
             fold_model = lgb.LGBMClassifier(**self.params)
             fold_model.fit(
-                X_train, y_train,
-                eval_set=[(X_test, y_test)],
+                X_arr[pure_train_idx], y_arr[pure_train_idx],
+                eval_set=[(X_arr[val_idx], y_arr[val_idx])],
                 callbacks=[
                     lgb.early_stopping(50, verbose=False),
                     lgb.log_evaluation(0),
                 ],
             )
 
-            score = fold_model.score(X_test, y_test)
+            score = fold_model.score(X_arr[test_idx], y_arr[test_idx])
             self.cv_scores.append(score)
+            accumulated_importances += fold_model.feature_importances_
+
+            if oof_probs is not None:
+                oof_probs[test_idx] = fold_model.predict_proba(
+                    X_arr[test_idx]
+                )[:, 1]
 
             fold_details.append({
                 "fold": fold + 1,
-                "train_size": len(X_train),
-                "test_size": len(X_test),
+                "train_size": len(pure_train_idx),
+                "val_size": len(val_idx),
+                "test_size": len(test_idx),
                 "accuracy": round(score, 4),
             })
 
+            step += 1
             if status_callback:
-                status_callback(f"  Fold {fold + 1}/{CV_N_SPLITS}: accuracy={score:.4f}")
+                status_callback(
+                    f"  Fold {fold + 1}/{CV_N_SPLITS}: accuracy={score:.4f}"
+                )
             if progress_callback:
-                progress_callback((fold + 1) / (CV_N_SPLITS + 2))
+                progress_callback(step / total_steps)
 
-        # Calibration: fit on last fold's held-out predictions
-        last_train_idx, last_test_idx = list(tscv.split(X_arr))[-1]
+        # ── Phase 2: Feature selection (averaged CV importances) ──
+        if need_fs:
+            avg_importances = accumulated_importances / CV_N_SPLITS
+            top_indices = np.argsort(avg_importances)[::-1][
+                :FEATURE_IMPORTANCE_TOP_N
+            ]
+            selected_cols = [all_feature_columns[i] for i in top_indices]
+            X_sel = X_arr[:, top_indices]
+
+            if status_callback:
+                status_callback(
+                    f"[{self.index_name}] 피처 선택: "
+                    f"{len(all_feature_columns)} -> {len(selected_cols)}"
+                )
+            self.feature_columns = selected_cols
+
+            # ── Phase 3: Second CV on selected features → OOF for calibration ──
+            oof_probs = np.full(len(y_arr), np.nan)
+
+            for fold, (train_idx, test_idx) in enumerate(tscv.split(X_sel)):
+                pure_train_idx, val_idx = _split_train_val(train_idx)
+
+                m = lgb.LGBMClassifier(**self.params)
+                m.fit(
+                    X_sel[pure_train_idx], y_arr[pure_train_idx],
+                    eval_set=[(X_sel[val_idx], y_arr[val_idx])],
+                    callbacks=[
+                        lgb.early_stopping(50, verbose=False),
+                        lgb.log_evaluation(0),
+                    ],
+                )
+                oof_probs[test_idx] = m.predict_proba(X_sel[test_idx])[:, 1]
+
+                step += 1
+                if progress_callback:
+                    progress_callback(step / total_steps)
+        else:
+            X_sel = X_arr
+
+        # ── Phase 4: Calibration from OOF predictions ──
         if CALIBRATION_ENABLED:
             if status_callback:
-                status_callback(f"[{self.index_name}] 확률 캘리브레이션 학습 중...")
+                status_callback(
+                    f"[{self.index_name}] 확률 캘리브레이션 학습 중..."
+                )
 
-            X_cal_train = X_arr[last_train_idx]
-            X_cal_test = X_arr[last_test_idx]
-            y_cal_train = y_arr[last_train_idx]
-            y_cal_test = y_arr[last_test_idx]
-
-            cal_model = lgb.LGBMClassifier(**self.params)
-            cal_model.fit(
-                X_cal_train, y_cal_train,
-                eval_set=[(X_cal_test, y_cal_test)],
-                callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)],
-            )
-            raw_probs = cal_model.predict_proba(X_cal_test)[:, 1]
+            valid = ~np.isnan(oof_probs)
+            n_cal = int(valid.sum())
 
             if CALIBRATION_METHOD == "isotonic":
                 self.calibrator = IsotonicRegression(out_of_bounds="clip")
-                self.calibrator.fit(raw_probs, y_cal_test)
+                self.calibrator.fit(oof_probs[valid], y_arr[valid])
             else:
                 self.calibrator = LogisticRegression()
-                self.calibrator.fit(raw_probs.reshape(-1, 1), y_cal_test)
+                self.calibrator.fit(
+                    oof_probs[valid].reshape(-1, 1), y_arr[valid]
+                )
             self.calibration_method = CALIBRATION_METHOD
 
             if status_callback:
-                status_callback(f"  캘리브레이션 완료 (method={CALIBRATION_METHOD}, samples={len(y_cal_test)})")
+                status_callback(
+                    f"  캘리브레이션 완료 "
+                    f"(method={CALIBRATION_METHOD}, OOF samples={n_cal})"
+                )
 
-        # Final model on full data
+        # ── Phase 5: Final model on all data (selected features) ──
         if status_callback:
-            status_callback(f"[{self.index_name}] 전체 데이터로 최종 모델 학습 중...")
+            status_callback(
+                f"[{self.index_name}] 전체 데이터로 최종 모델 학습 중..."
+            )
 
         self.model = lgb.LGBMClassifier(**self.params)
-        self.model.fit(X_arr, y_arr)
+        self.model.fit(X_sel, y_arr)
 
-        # Feature selection: retrain with top features only
-        if FEATURE_SELECTION_ENABLED and len(self.feature_columns) > FEATURE_IMPORTANCE_TOP_N:
-            importances = self.model.feature_importances_
-            top_indices = np.argsort(importances)[::-1][:FEATURE_IMPORTANCE_TOP_N]
-            selected = [self.feature_columns[i] for i in top_indices]
-
-            if status_callback:
-                status_callback(f"[{self.index_name}] 피처 선택: {len(self.feature_columns)} -> {len(selected)}")
-
-            X_selected = X_arr[:, top_indices]
-            self.model = lgb.LGBMClassifier(**self.params)
-            self.model.fit(X_selected, y_arr)
-            self.feature_columns = selected
-
-            # Re-calibrate with selected features
-            if CALIBRATION_ENABLED and self.calibrator is not None:
-                y_cal_train = y_arr[last_train_idx]
-                y_cal_test = y_arr[last_test_idx]
-                cal_model2 = lgb.LGBMClassifier(**self.params)
-                X_cal_train_sel = X_arr[last_train_idx][:, top_indices]
-                X_cal_test_sel = X_arr[last_test_idx][:, top_indices]
-                cal_model2.fit(
-                    X_cal_train_sel, y_cal_train,
-                    eval_set=[(X_cal_test_sel, y_cal_test)],
-                    callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)],
-                )
-                raw_probs2 = cal_model2.predict_proba(X_cal_test_sel)[:, 1]
-                if CALIBRATION_METHOD == "isotonic":
-                    self.calibrator = IsotonicRegression(out_of_bounds="clip")
-                    self.calibrator.fit(raw_probs2, y_cal_test)
-                else:
-                    self.calibrator = LogisticRegression()
-                    self.calibrator.fit(raw_probs2.reshape(-1, 1), y_cal_test)
-
+        step += 1
         if progress_callback:
             progress_callback(1.0)
 
-        # Feature importance
+        # Feature importance (from final model)
         importance = dict(zip(
             self.feature_columns,
             self.model.feature_importances_.tolist(),
         ))
-        importance_sorted = dict(sorted(importance.items(), key=lambda x: x[1], reverse=True))
+        importance_sorted = dict(
+            sorted(importance.items(), key=lambda x: x[1], reverse=True)
+        )
+
+        mean_acc = round(float(np.mean(self.cv_scores)), 4)
+        std_acc = round(float(np.std(self.cv_scores)), 4)
 
         metrics = {
             "index_name": self.index_name,
-            "cv_accuracy_mean": round(float(np.mean(self.cv_scores)), 4),
-            "cv_accuracy_std": round(float(np.std(self.cv_scores)), 4),
+            "cv_accuracy_mean": mean_acc,
+            "cv_accuracy_std": std_acc,
             "cv_scores": [round(s, 4) for s in self.cv_scores],
             "fold_details": fold_details,
             "n_samples": len(X),
@@ -178,9 +237,10 @@ class ModelTrainer:
         }
 
         if status_callback:
-            mean_acc = metrics["cv_accuracy_mean"]
-            std_acc = metrics["cv_accuracy_std"]
-            status_callback(f"[{self.index_name}] 완료: CV accuracy = {mean_acc:.4f} +/- {std_acc:.4f}")
+            status_callback(
+                f"[{self.index_name}] 완료: "
+                f"CV accuracy = {mean_acc:.4f} +/- {std_acc:.4f}"
+            )
 
         return {
             "model": self.model,
