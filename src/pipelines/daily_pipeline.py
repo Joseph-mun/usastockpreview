@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """Daily prediction pipeline: load models, fetch data, predict, notify."""
 
+import json
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
-from src.config import INDEX_CONFIGS, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, META_LEARNER_ENABLED
+from src.config import INDEX_CONFIGS, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, META_LEARNER_ENABLED, DATA_DIR
 from src.data.collectors import get_index_data, SMACollector
 from src.data.features import DatasetBuilder
 from src.data.cache import SMACache
@@ -222,6 +223,42 @@ def run_daily_prediction(verbose: bool = True):
             import re
             clean = re.sub(r"<[^>]+>", "", table_text)
             print("\n" + clean)
+
+    # ── Step 6.5: Save prediction signal as JSON ──
+    # 자동매매 시스템이 이 파일을 읽어서 매매 신호로 활용
+    try:
+        kst = timezone(timedelta(hours=9))
+        now_kst = datetime.now(kst)
+
+        signal_text, _ = IndexPredictor.get_signal(primary_prob)
+        prev_prob_value = prev_predictions.get(primary_index)
+
+        signal_data = {
+            "date": now_kst.strftime("%Y-%m-%d"),
+            "timestamp": now_kst.isoformat(),
+            "probability": round(primary_prob, 4),
+            "signal": signal_text,
+            "tier": allocation.tier_label,
+            "allocation": {
+                "tqqq": round(allocation.tqqq_weight, 2),
+                "splg": round(allocation.spy_weight, 2),
+                "cash": round(allocation.cash_weight, 2),
+            },
+            "indicators": {
+                "rsi": round(current_indicators.get("rsi", 0.0), 2),
+                "vix": round(current_indicators.get("vix", 0.0), 2),
+                "sma50_ratio": round(current_indicators.get("sma50_ratio", 0.0), 4),
+            },
+            "prev_probability": round(prev_prob_value, 4) if prev_prob_value is not None else None,
+            "meta_learner_adjusted": META_LEARNER_ENABLED and meta_learner is not None,
+        }
+
+        signal_path = DATA_DIR / "prediction_signal.json"
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        signal_path.write_text(json.dumps(signal_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        log(f"  Signal JSON 저장 완료: {signal_path}")
+    except Exception as e:
+        log(f"  Signal JSON 저장 실패: {e}")
 
     elapsed = time.time() - start_time
     log(f"\n완료 (소요 시간: {elapsed:.1f}초)")
