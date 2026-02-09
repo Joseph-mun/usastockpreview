@@ -53,7 +53,7 @@ TARGET_DOWN_THRESHOLD = 1.0  # any negative return (price went down)
 
 # ==================== Calibration ====================
 CALIBRATION_ENABLED = True
-CALIBRATION_METHOD = "isotonic"  # "platt" (smooth sigmoid) or "isotonic" (step function)
+CALIBRATION_METHOD = "platt"  # "platt" (smooth sigmoid) or "isotonic" (step function)
 
 # ==================== Feature Selection ====================
 FEATURE_SELECTION_ENABLED = True
@@ -112,3 +112,7 @@ ALLOCATION_TIERS = [
 ]
 
 REBALANCE_HYSTERESIS = 0.05  # 5%p move required to trigger rebalance
+
+# ==================== Probability Clipping ====================
+PROB_CLIP_MIN = 0.05  # minimum probability (prevents 0% overconfidence)
+PROB_CLIP_MAX = 0.95  # maximum probability (prevents 100% overconfidence)

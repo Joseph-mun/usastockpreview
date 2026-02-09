@@ -8,7 +8,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from src.config import MODEL_DIR, INDEX_CONFIGS, SIGNAL_THRESHOLDS
+from src.config import MODEL_DIR, INDEX_CONFIGS, SIGNAL_THRESHOLDS, PROB_CLIP_MIN, PROB_CLIP_MAX
 
 
 class IndexPredictor:
@@ -48,28 +48,32 @@ class IndexPredictor:
         return loaded
 
     def _calibrate(self, index_name: str, raw_prob: float) -> float:
-        """Apply calibration to raw probability."""
+        """Apply calibration to raw probability, then clip to safe range."""
         calibrator = self.calibrators.get(index_name)
         if calibrator is None:
-            return raw_prob
+            return np.clip(raw_prob, PROB_CLIP_MIN, PROB_CLIP_MAX)
 
         method = self.calibration_methods.get(index_name)
         if method == "isotonic":
-            return float(calibrator.predict([raw_prob])[0])
+            cal = float(calibrator.predict([raw_prob])[0])
         else:
-            return float(calibrator.predict_proba([[raw_prob]])[0][1])
+            cal = float(calibrator.predict_proba([[raw_prob]])[0][1])
+
+        return np.clip(cal, PROB_CLIP_MIN, PROB_CLIP_MAX)
 
     def _calibrate_array(self, index_name: str, raw_probs: np.ndarray) -> np.ndarray:
-        """Apply calibration to array of probabilities."""
+        """Apply calibration to array of probabilities, then clip to safe range."""
         calibrator = self.calibrators.get(index_name)
         if calibrator is None:
-            return raw_probs
+            return np.clip(raw_probs, PROB_CLIP_MIN, PROB_CLIP_MAX)
 
         method = self.calibration_methods.get(index_name)
         if method == "isotonic":
-            return calibrator.predict(raw_probs)
+            cal = calibrator.predict(raw_probs)
         else:
-            return calibrator.predict_proba(raw_probs.reshape(-1, 1))[:, 1]
+            cal = calibrator.predict_proba(raw_probs.reshape(-1, 1))[:, 1]
+
+        return np.clip(cal, PROB_CLIP_MIN, PROB_CLIP_MAX)
 
     def predict_current(self, index_name: str, features: pd.Series) -> float | None:
         """Predict calibrated probability for a single index."""

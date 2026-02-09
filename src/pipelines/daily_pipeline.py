@@ -141,10 +141,11 @@ def run_daily_prediction(verbose: bool = True):
 
             # Build meta features from recent history
             recent_probs = []
-            recent_actuals = []
             nasdaq_hist = prob_histories.get(primary_index)
             if nasdaq_hist is not None and len(nasdaq_hist) >= 6:
                 recent_probs = nasdaq_hist["Probability"].iloc[-6:-1].tolist()
+
+            recent_actuals = meta_learner.get_recent_actuals(n=5)
 
             rsi_val = current_indicators.get("rsi", 50.0)
             meta_features = meta_learner.build_features(
