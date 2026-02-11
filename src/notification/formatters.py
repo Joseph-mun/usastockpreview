@@ -36,7 +36,7 @@ def format_daily_summary(
 ) -> str:
     """
     Format the main daily summary message (HTML).
-    predictions: {"NASDAQ": 0.723, "SP500": 0.651, "DOW": 0.587}
+    predictions: {"NASDAQ": 0.723, ...}  (keys match INDEX_CONFIGS)
     prices: {"NASDAQ": 18456.23, ...}
     prev_predictions: yesterday's predictions for delta calculation
     indicators: {"vix": 16.42, "rsi": 58.3, "sma50_ratio": 0.682}
@@ -114,11 +114,14 @@ def format_5day_table(
     Format recent 5-day probability table (monospace text).
     history: {"NASDAQ": DataFrame with Probability column, ...}
     """
+    index_names = list(history.keys())
+
+    header_cols = "  ".join(f"{n:>7s}" for n in index_names)
     lines = [
         "<b>최근 5일 추이</b>",
         "",
         "<pre>",
-        f"{'날짜':10s}  {'NASDAQ':>7s}  {'SP500':>7s}  {'DOW':>7s}",
+        f"{'날짜':10s}  {header_cols}",
     ]
 
     # Get union of dates (last 5)
@@ -131,7 +134,7 @@ def format_5day_table(
     for dt in dates_sorted:
         dt_str = dt.strftime("%m-%d") + f"({_day_kr(dt)})"
         values = []
-        for index_name in ["NASDAQ", "SP500", "DOW"]:
+        for index_name in index_names:
             df = history.get(index_name)
             if df is not None and dt in df.index:
                 val = df.loc[dt, "Probability"] * 100
@@ -142,7 +145,7 @@ def format_5day_table(
 
     # Delta (5-day change)
     delta_parts = []
-    for index_name in ["NASDAQ", "SP500", "DOW"]:
+    for index_name in index_names:
         df = history.get(index_name)
         if df is not None and len(df) >= 5:
             recent = df.iloc[-5:]
@@ -168,7 +171,7 @@ def create_probability_chart(
     Create a chart image with probability trends and index prices.
     Returns PNG bytes.
 
-    history: {"NASDAQ": DataFrame(Probability), "SP500": ..., "DOW": ...}
+    history: {"NASDAQ": DataFrame(Probability), ...}  (keys match INDEX_CONFIGS)
     prices: {"NASDAQ": Series(Adj Close), ...}
     """
     fig, (ax1, ax2) = plt.subplots(
@@ -176,11 +179,8 @@ def create_probability_chart(
     )
     fig.patch.set_facecolor("#f7f9ff")
 
-    colors = {
-        "NASDAQ": "#FF4B4B",
-        "SP500": "#2ECC71",
-        "DOW": "#F1C40F",
-    }
+    _palette = ["#FF4B4B", "#2ECC71", "#F1C40F", "#3498DB", "#9B59B6"]
+    colors = {name: _palette[i % len(_palette)] for i, name in enumerate(INDEX_CONFIGS)}
 
     # ── Top: Probability trends ──
     ax1.set_facecolor("#ffffff")
