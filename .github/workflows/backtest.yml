@@ -15,6 +15,9 @@ jobs:
   backtest:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - name: Checkout repository
@@ -30,7 +33,9 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run backtest
-        run: python backtest.py --days ${{ github.event.inputs.days || '30' }}
+        env:
+          BACKTEST_DAYS: ${{ github.event.inputs.days || '30' }}
+        run: python backtest.py --days "$BACKTEST_DAYS"
 
       - name: Upload HTML report
         uses: actions/upload-artifact@v4
@@ -40,15 +45,17 @@ jobs:
 
       - name: Send report via Telegram
         if: ${{ env.TELEGRAM_TOKEN != '' }}
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -c "
-          import requests, os
+          import requests, os, sys
           token = os.environ['TELEGRAM_TOKEN']
           chat_id = os.environ['TELEGRAM_CHAT_ID']
           url = f'https://api.telegram.org/bot{token}/sendDocument'
-          with open('backtest_report.html', 'rb') as f:
-              requests.post(url, data={'chat_id': chat_id, 'caption': 'NASDAQ Backtest Report'}, files={'document': f})
+          try:
+              with open('backtest_report.html', 'rb') as f:
+                  resp = requests.post(url, data={'chat_id': chat_id, 'caption': 'NASDAQ Backtest Report'}, files={'document': f}, timeout=60)
+                  resp.raise_for_status()
+          except Exception as e:
+              print(f'Telegram send failed: {e}', file=sys.stderr)
+              sys.exit(1)
           "

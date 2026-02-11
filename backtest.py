@@ -29,8 +29,13 @@ from src.strategy.portfolio_backtest import (
 )
 
 
-def run_backtest(backtest_days: int = 30, verbose: bool = True):
-    """Walk-forward backtest with portfolio simulation."""
+def run_backtest(backtest_days: int = 252, retrain_freq: int = 60, verbose: bool = True):
+    """Expanding walk-forward backtest with periodic retraining.
+
+    Args:
+        backtest_days: total evaluation period in trading days (default 252 = 1 year)
+        retrain_freq: retrain every N trading days (default 60 = ~3 months)
+    """
     def log(msg):
         if verbose:
             print(msg)
@@ -59,47 +64,87 @@ def run_backtest(backtest_days: int = 30, verbose: bool = True):
     log(f"   기간: {spy.index[0].strftime('%Y-%m-%d')} ~ {spy.index[-1].strftime('%Y-%m-%d')}")
     log(f"   Target=1 비율: {y.mean():.3f}")
 
-    # 3. Walk-forward split
-    n_days = min(backtest_days, len(X) - 100)
-    split_idx = len(X) - n_days
+    close_col = "Adj Close" if "Adj Close" in spy.columns else "Close"
 
-    X_train, y_train = X.iloc[:split_idx], y.iloc[:split_idx]
-    X_test, y_test = X.iloc[split_idx:], y.iloc[split_idx:]
-    spy_test = spy.loc[X_test.index]
+    # 3. Expanding Walk-Forward
+    eval_days = min(backtest_days, len(X) - 500)  # need 500+ for training
+    wf_origin = len(X) - eval_days  # first train/test split point
 
-    log(f"3. Walk-forward 백테스트...")
-    log(f"   학습: {len(X_train)} samples, 테스트: {len(X_test)} samples")
-
-    # 4. Train with calibration + feature selection
     from src.models.trainer import ModelTrainer
-    trainer = ModelTrainer(index_name)
-    result = trainer.train(X_train, y_train, status_callback=lambda msg: log(f"   {msg}"))
-    model = result["model"]
-    feature_cols = trainer.feature_columns
-    calibrator = trainer.calibrator
-    cal_method = trainer.calibration_method
 
-    # 5. Predict on test set
-    log(f"\n4. 최근 {len(X_test)}일 예측...")
-    X_test_aligned = X_test.reindex(columns=feature_cols).fillna(0) if feature_cols else X_test
-    raw_probs = model.predict_proba(X_test_aligned.values)[:, 1]
+    all_predictions = []
+    n_windows = 0
 
-    if calibrator is not None:
-        if cal_method == "isotonic":
-            cal_probs = calibrator.predict(raw_probs)
+    log(f"3. Expanding Walk-Forward ({eval_days}일, retrain 주기={retrain_freq}일)...")
+
+    for wf_start in range(wf_origin, len(X), retrain_freq):
+        wf_end = min(wf_start + retrain_freq, len(X))
+        X_train_wf = X.iloc[:wf_start]
+        y_train_wf = y.iloc[:wf_start]
+        X_test_wf = X.iloc[wf_start:wf_end]
+        y_test_wf = y.iloc[wf_start:wf_end]
+
+        if len(X_train_wf) < 500 or len(X_test_wf) == 0:
+            continue
+
+        n_windows += 1
+        log(f"\n   --- Window {n_windows}: train={len(X_train_wf)}, test={len(X_test_wf)} ---")
+
+        trainer = ModelTrainer(index_name)
+        result = trainer.train(
+            X_train_wf, y_train_wf,
+            status_callback=lambda msg: log(f"   {msg}") if verbose else None,
+        )
+
+        feature_cols = trainer.feature_columns
+        calibrator = trainer.calibrator
+        cal_method = trainer.calibration_method
+        model = result["model"]
+
+        X_test_aligned = X_test_wf.reindex(columns=feature_cols).fillna(0)
+        raw_probs = model.predict_proba(X_test_aligned.values)[:, 1]
+
+        if calibrator is not None:
+            if cal_method == "isotonic":
+                cal_probs = calibrator.predict(raw_probs)
+            else:
+                cal_probs = calibrator.predict_proba(raw_probs.reshape(-1, 1))[:, 1]
         else:
-            cal_probs = calibrator.predict_proba(raw_probs.reshape(-1, 1))[:, 1]
-    else:
-        cal_probs = raw_probs
+            cal_probs = raw_probs
 
-    prob_series = pd.Series(cal_probs, index=X_test.index, name="Probability")
-    close_col = "Adj Close" if "Adj Close" in spy_test.columns else "Close"
+        window_correct = 0
+        for i, date in enumerate(X_test_wf.index):
+            prob = float(cal_probs[i])
+            actual = int(y_test_wf.iloc[i])
+            predicted = 1 if prob >= 0.5 else 0
+            if predicted == actual:
+                window_correct += 1
+            all_predictions.append({
+                "date": date,
+                "prob": prob,
+                "raw_prob": float(raw_probs[i]),
+                "actual": actual,
+                "predicted": predicted,
+                "window": n_windows,
+            })
 
-    # 6. Build results table
+        window_acc = window_correct / len(X_test_wf)
+        log(f"   Window {n_windows} accuracy: {window_acc:.1%} ({window_correct}/{len(X_test_wf)})")
+
+    log(f"\n4. 결과 집계 ({len(all_predictions)}일, {n_windows}개 윈도우)...")
+
+    # Build results table from all_predictions
+    spy_test = spy.loc[[p["date"] for p in all_predictions]]
+    prob_series = pd.Series(
+        [p["prob"] for p in all_predictions],
+        index=[p["date"] for p in all_predictions],
+        name="Probability",
+    )
+
     results = []
-    for i, date in enumerate(X_test.index):
-        prob = float(cal_probs[i])
-        actual_target = int(y_test.iloc[i])
+    for p in all_predictions:
+        date = p["date"]
+        prob = p["prob"]
 
         if prob >= SIGNAL_THRESHOLDS["strong_buy"]:
             signal = "Strong Buy"
@@ -110,10 +155,9 @@ def run_backtest(backtest_days: int = 30, verbose: bool = True):
         else:
             signal = "Sell"
 
-        predicted = 1 if prob >= 0.5 else 0
-        price = float(spy_test[close_col].iloc[i])
-        after_price = float(spy_test["after"].iloc[i]) if "after" in spy_test.columns and not pd.isna(spy_test["after"].iloc[i]) else None
-        return_pct = float(spy_test["suik_rate"].iloc[i]) if "suik_rate" in spy_test.columns and not pd.isna(spy_test["suik_rate"].iloc[i]) else None
+        price = float(spy.loc[date, close_col])
+        after_price = float(spy.loc[date, "after"]) if "after" in spy.columns and not pd.isna(spy.loc[date, "after"]) else None
+        return_pct = float(spy.loc[date, "suik_rate"]) if "suik_rate" in spy.columns and not pd.isna(spy.loc[date, "suik_rate"]) else None
         alloc = get_allocation(prob)
 
         results.append({
@@ -123,16 +167,17 @@ def run_backtest(backtest_days: int = 30, verbose: bool = True):
             "after_price": after_price,
             "return_pct": return_pct,
             "probability": prob,
+            "raw_prob": p.get("raw_prob", prob),
             "signal": signal,
-            "predicted": predicted,
-            "actual": actual_target,
-            "correct": predicted == actual_target,
+            "predicted": p["predicted"],
+            "actual": p["actual"],
+            "correct": p["predicted"] == p["actual"],
             "tier": alloc.tier_label,
         })
 
     df_results = pd.DataFrame(results)
 
-    # 7. Metrics
+    # 5. Metrics
     total = len(df_results)
     correct_count = int(df_results["correct"].sum())
     accuracy = correct_count / total if total > 0 else 0
@@ -155,7 +200,7 @@ def run_backtest(backtest_days: int = 30, verbose: bool = True):
                 "avg_return": float(subset["return_pct"].mean()) if subset["return_pct"].notna().any() else 0,
             }
 
-    # 8. Portfolio simulation
+    # 6. Portfolio simulation
     log("\n5. 포트폴리오 시뮬레이션...")
     nasdaq_prices = spy_test[close_col]
     try:
@@ -163,11 +208,18 @@ def run_backtest(backtest_days: int = 30, verbose: bool = True):
         spy_prices = spy_data["Adj Close"] if "Adj Close" in spy_data.columns else spy_data["Close"]
     except Exception as e:
         log(f"   SPY 데이터 실패: {e}")
-        spy_prices = nasdaq_prices * 0.4  # rough approximation
+        spy_prices = nasdaq_prices * 0.4
 
-    port_df = run_portfolio_backtest(prob_series, nasdaq_prices, spy_prices)
+    # Extract VIX/ADX for portfolio simulation risk filters
+    vix_series = spy["vix"].reindex(prob_series.index).ffill() if "vix" in spy.columns else None
+    adx_series = spy["adx"].reindex(prob_series.index).ffill() if "adx" in spy.columns else None
+
+    port_df = run_portfolio_backtest(
+        prob_series, nasdaq_prices, spy_prices,
+        vix_series=vix_series, adx_series=adx_series,
+    )
     port_metrics = compute_backtest_metrics(port_df) if not port_df.empty else {}
-    benchmarks = compute_benchmark_returns(nasdaq_prices, spy_prices, X_test.index) if not port_df.empty else {}
+    benchmarks = compute_benchmark_returns(nasdaq_prices, spy_prices, prob_series.index) if not port_df.empty else {}
 
     if port_metrics:
         log(f"   전략 수익률: {port_metrics['total_return']*100:+.2f}%")
@@ -178,11 +230,13 @@ def run_backtest(backtest_days: int = 30, verbose: bool = True):
         "total": total, "correct": correct_count, "accuracy": accuracy,
         "precision": precision, "recall": recall, "f1": f1,
         "tp": tp, "fp": fp, "tn": tn, "fn": fn,
+        "n_windows": n_windows, "retrain_freq": retrain_freq,
         "signal_stats": signal_stats,
         "portfolio": port_metrics, "benchmarks": benchmarks,
     }
 
     log(f"\n   전체 정확도: {accuracy:.1%} ({correct_count}/{total})")
+    log(f"   평가 윈도우: {n_windows}개, 재학습 주기: {retrain_freq}일")
     return df_results, metrics, spy_test, port_df
 
 
@@ -283,12 +337,15 @@ def generate_html_report(df_results, metrics, spy_test, port_df, output_path):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="NASDAQ Backtest")
-    parser.add_argument("--days", type=int, default=30)
+    parser.add_argument("--days", type=int, default=252, help="Evaluation period in trading days")
+    parser.add_argument("--retrain-freq", type=int, default=60, help="Retrain every N trading days")
     args = parser.parse_args()
     print("=" * 60)
-    print(f"  NASDAQ Backtest - {args.days}거래일 + 포트폴리오 시뮬레이션")
+    print(f"  NASDAQ Backtest - {args.days}거래일 Expanding WF (retrain={args.retrain_freq}일)")
     print("=" * 60)
-    df_results, metrics, spy_test, port_df = run_backtest(backtest_days=args.days)
+    df_results, metrics, spy_test, port_df = run_backtest(
+        backtest_days=args.days, retrain_freq=args.retrain_freq,
+    )
     output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_report.html")
     generate_html_report(df_results, metrics, spy_test, port_df, output_path)
     print(f"\nHTML 리포트 생성 완료: {output_path}")

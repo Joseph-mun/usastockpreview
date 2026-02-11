@@ -10,6 +10,7 @@ from src.config import (
     DATA_START_DATE, MA_WINDOWS, LAG_PERIODS, ROLLING_WINDOWS,
     TARGET_LOOKAHEAD_DAYS, TARGET_UP_THRESHOLD, TARGET_DOWN_THRESHOLD,
     LEAK_COLUMNS, BASE_PRICE_COLUMNS, TRAIN_WINDOW_YEARS,
+    TARGET_MODE, TARGET_ROLLING_MEDIAN_WINDOW,
 )
 from src.data.collectors import (
     get_index_data, get_bond_data, get_vix_data, get_yield_spread,
@@ -221,8 +222,10 @@ def calculate_mean_reversion(df: pd.DataFrame, windows: list[int] = None) -> pd.
 def build_target(df: pd.DataFrame) -> pd.DataFrame:
     """
     Build target variables with unified lookahead.
-    Fixed: previously after=shift(-15) and after2=rolling(20) were inconsistent.
-    Now both use TARGET_LOOKAHEAD_DAYS=20.
+
+    TARGET_MODE controls target definition:
+      - "raw": original binary (price up in 20d, base rate ~67%)
+      - "excess_return": above rolling median 20d return (base rate ~50%)
     """
     spy = df.copy()
     close = spy["Adj Close"] if "Adj Close" in spy.columns else spy["Close"]
@@ -237,14 +240,26 @@ def build_target(df: pd.DataFrame) -> pd.DataFrame:
     # After price (unified to lookahead days)
     spy["after"] = close.shift(-TARGET_LOOKAHEAD_DAYS)
 
-    # Binary targets
-    # Target: will price be higher in 20 trading days? (uses 'after', not 'after2')
-    # With TARGET_UP_THRESHOLD=1.0, Target=1 means price went up (any positive return)
-    spy["Target"] = np.where(spy["after"] > TARGET_UP_THRESHOLD * close, 1, 0)
-    spy["TargetDown"] = np.where(spy["after2_low"] < TARGET_DOWN_THRESHOLD * close, 1, 0)
-
     # Return rate
     spy["suik_rate"] = 100 * (spy["after"] - close) / close
+
+    # Binary targets
+    if TARGET_MODE == "excess_return":
+        # Excess return: compare FUTURE 20d return against historical median
+        future_ret = close.shift(-TARGET_LOOKAHEAD_DAYS) / close - 1
+        # Historical median uses PAST returns only (known at time t)
+        past_ret = close.pct_change(TARGET_LOOKAHEAD_DAYS)
+        rolling_med = past_ret.rolling(TARGET_ROLLING_MEDIAN_WINDOW).median()
+        spy["Target"] = np.where(future_ret > rolling_med, 1, 0)
+    else:
+        # Original raw target
+        spy["Target"] = np.where(
+            spy["after"] > TARGET_UP_THRESHOLD * close, 1, 0
+        )
+
+    spy["TargetDown"] = np.where(
+        spy["after2_low"] < TARGET_DOWN_THRESHOLD * close, 1, 0
+    )
 
     return spy
 
@@ -474,6 +489,21 @@ class DatasetBuilder:
             if for_prediction:
                 spy["vol_roc5"] = spy["vol_roc5"].ffill().bfill()
                 spy["vol_roc20"] = spy["vol_roc20"].ffill().bfill()
+
+        # 22. Momentum percentile features (Phase 4: context-aware momentum)
+        close_feat = spy["Adj Close"] if "Adj Close" in spy.columns else spy["Close"]
+        for p in [10, 20]:
+            mom_col = f"momentum_{p}d"
+            if mom_col in spy.columns:
+                spy[f"mom{p}_pctile"] = spy[mom_col].rolling(252, min_periods=60).rank(pct=True)
+                if for_prediction:
+                    spy[f"mom{p}_pctile"] = spy[f"mom{p}_pctile"].ffill().bfill()
+
+        # 23. Rolling median return as feature (Phase 4: expose target "bar")
+        past_ret_feat = close_feat.pct_change(TARGET_LOOKAHEAD_DAYS)
+        spy["rolling_med_ret"] = past_ret_feat.rolling(TARGET_ROLLING_MEDIAN_WINDOW, min_periods=60).median()
+        if for_prediction:
+            spy["rolling_med_ret"] = spy["rolling_med_ret"].ffill().bfill()
 
         # Final: fill remaining NaN for prediction
         if for_prediction:

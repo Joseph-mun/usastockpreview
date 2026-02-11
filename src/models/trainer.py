@@ -94,6 +94,9 @@ class ModelTrainer:
         oof_probs = None if need_fs else np.full(len(y_arr), np.nan)
 
         for fold, (train_idx, test_idx) in enumerate(tscv.split(X_arr)):
+            # Purge: remove last CV_GAP samples from train to prevent label leakage
+            if len(train_idx) > CV_GAP:
+                train_idx = train_idx[:-CV_GAP]
             pure_train_idx, val_idx = _split_train_val(train_idx)
 
             fold_model = lgb.LGBMClassifier(**self.params)
@@ -151,6 +154,8 @@ class ModelTrainer:
             oof_probs = np.full(len(y_arr), np.nan)
 
             for fold, (train_idx, test_idx) in enumerate(tscv.split(X_sel)):
+                if len(train_idx) > CV_GAP:
+                    train_idx = train_idx[:-CV_GAP]
                 pure_train_idx, val_idx = _split_train_val(train_idx)
 
                 m = lgb.LGBMClassifier(**self.params)

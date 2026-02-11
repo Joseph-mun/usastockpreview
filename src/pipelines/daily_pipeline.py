@@ -106,6 +106,8 @@ def run_daily_prediction(verbose: bool = True):
                 current_indicators["rsi"] = float(spy["rsi"].iloc[-1])
             if "ratio_sma50" in spy.columns and index_name == "NASDAQ":
                 current_indicators["sma50_ratio"] = float(spy["ratio_sma50"].iloc[-1])
+            if "adx" in spy.columns and index_name == "NASDAQ":
+                current_indicators["adx"] = float(spy["adx"].iloc[-1])
 
             # Probability history (for chart + table)
             prob_hist = predictor.predict_history(index_name, X, days=500)
@@ -160,15 +162,20 @@ def run_daily_prediction(verbose: bool = True):
         except Exception as e:
             log(f"  Meta Learner 오류 (기본 확률 사용): {e}")
 
-    # Compute allocation
-    allocation = get_allocation(primary_prob)
+    # Compute allocation (with VIX filter + regime detection)
+    current_vix = current_indicators.get("vix")
+    current_adx = current_indicators.get("adx")
+    allocation = get_allocation(primary_prob, vix=current_vix, adx=current_adx)
 
     # Check rebalance (compare with previous day)
     rebalance_info = None
     prev_prob = prev_predictions.get(primary_index)
     if prev_prob is not None:
-        prev_alloc = get_allocation(prev_prob)
-        rebalance_info = check_rebalance(primary_prob, prev_prob, prev_alloc.tier_label)
+        prev_alloc = get_allocation(prev_prob, vix=current_vix, adx=current_adx)
+        rebalance_info = check_rebalance(
+            primary_prob, prev_prob, prev_alloc.tier_label,
+            vix=current_vix, adx=current_adx,
+        )
 
     log(f"  Tier: {allocation.tier_label} | TQQQ: {allocation.tqqq_weight*100:.0f}% | SPY: {allocation.spy_weight*100:.0f}% | Cash: {allocation.cash_weight*100:.0f}%")
     if rebalance_info:
@@ -248,8 +255,11 @@ def run_daily_prediction(verbose: bool = True):
             "indicators": {
                 "rsi": round(current_indicators.get("rsi", 0.0), 2),
                 "vix": round(current_indicators.get("vix", 0.0), 2),
+                "adx": round(current_indicators.get("adx", 0.0), 2),
                 "sma50_ratio": round(current_indicators.get("sma50_ratio", 0.0), 4),
             },
+            "vix_filter": allocation.vix_filter_label,
+            "regime": allocation.regime_label,
             "prev_probability": round(prev_prob_value, 4) if prev_prob_value is not None else None,
             "meta_learner_adjusted": META_LEARNER_ENABLED and meta_learner is not None,
         }

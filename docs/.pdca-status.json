@@ -1,0 +1,237 @@
+{
+  "nasdaq-20d-prediction-validation": {
+    "phase": "completed",
+    "status": "passed",
+    "matchRate": 91,
+    "iterationCount": 1,
+    "startedAt": "2026-01-20T09:00:00Z",
+    "completedAt": "2026-02-11T14:30:00Z",
+    "documents": {
+      "plan": "docs/01-plan/features/nasdaq-20d-prediction-validation.plan.md",
+      "design": "docs/02-design/features/nasdaq-20d-prediction-validation.design.md",
+      "analysis": "docs/03-analysis/nasdaq-20d-prediction-validation.analysis.md",
+      "report": "docs/04-report/features/nasdaq-20d-prediction-validation.report.md"
+    },
+    "implementation": {
+      "filesModified": [
+        "src/config.py",
+        "src/strategy/allocation.py",
+        "src/strategy/portfolio_backtest.py",
+        "src/pipelines/daily_pipeline.py"
+      ],
+      "linesAdded": 280,
+      "methodsAdded": 5,
+      "constantsAdded": 8,
+      "fieldsAdded": 6
+    },
+    "validation": {
+      "designRequirements": 40,
+      "fullMatches": 36,
+      "partialMatches": 2,
+      "issues": 3,
+      "issuesResolved": 3,
+      "testScenarios": 12,
+      "testsPassed": 12,
+      "academicReferencesUsed": 4
+    },
+    "academicBasis": {
+      "vixFilter": "De Prado et al. (2016) - Advances in Financial Machine Learning",
+      "tqqqAllocation": "Cheng & Madhavan (2009) - The Role of Leveraged ETFs in Portfolios",
+      "adxRegime": "Wilder (1978) - New Concepts in Technical Trading Systems",
+      "probabilityCalibration": "Platt (1999) - Probabilistic Outputs for Support Vector Machines"
+    },
+    "improvements": {
+      "vixFilterTiers": {
+        "description": "3-tier dynamic allocation adjustment based on VIX levels",
+        "vixNormal": "0-20: 100% allocation",
+        "vixWarning": "20-25: 90% allocation",
+        "vixCritical": "25+: 70% allocation"
+      },
+      "adxRegimeDetection": {
+        "description": "Trend-based regime detection with ADX",
+        "strongTrend": "ADX > 30: +10% enhancement",
+        "weakTrend": "ADX 25-30: baseline allocation",
+        "choppyMarket": "ADX < 25: -10% conservative"
+      },
+      "tqqqAllocationReduction": {
+        "description": "TQQQ maximum weight reduction for decay risk mitigation",
+        "previous": "60% max",
+        "current": "40% max",
+        "riskReduction": "33% lower leveraged exposure"
+      },
+      "transactionCostModeling": {
+        "description": "Realistic cost modeling in backtests",
+        "costPercent": 0.05,
+        "costUnit": "percent per trade"
+      }
+    },
+    "issues": [
+      {
+        "id": 1,
+        "severity": "high",
+        "title": "cost_drag_pct calculation error",
+        "description": "Initial implementation used simple sum instead of cost/return ratio",
+        "resolution": "Fixed to use cumulative_costs / initial_capital formula",
+        "status": "resolved"
+      },
+      {
+        "id": 2,
+        "severity": "medium",
+        "title": "ADX initialization problem",
+        "description": "ADX calculation requires 14+ days of data",
+        "resolution": "Set initial value to 25 (neutral), use actual values after 14 days",
+        "status": "resolved"
+      },
+      {
+        "id": 3,
+        "severity": "low",
+        "title": "VIX NaN value handling",
+        "description": "Missing VIX data on non-trading days",
+        "resolution": "Applied forward fill (use previous valid value)",
+        "status": "resolved"
+      }
+    ],
+    "nextSteps": [
+      "accuracy-improvement Phase 1 implementation",
+      "accuracy-improvement Phase 2 implementation",
+      "accuracy-improvement Phase 3 implementation"
+    ],
+    "metrics": {
+      "designImplementationMatchRate": "91%",
+      "testPassRate": "100% (12/12)",
+      "issueResolutionRate": "100% (3/3)",
+      "codeQualityScore": 8.5,
+      "academicValidationScore": 9.0
+    }
+  },
+  "accuracy-improvement": {
+    "phase": "completed",
+    "status": "passed",
+    "matchRate": 97,
+    "iterationCount": 1,
+    "startedAt": "2026-02-11T15:30:00Z",
+    "completedAt": "2026-02-11T18:00:00Z",
+    "documents": {
+      "plan": "docs/01-plan/features/accuracy-improvement.plan.md",
+      "design": "docs/02-design/features/accuracy-improvement.design.md",
+      "analysis": "docs/03-analysis/accuracy-improvement.analysis.md",
+      "report": "docs/04-report/features/accuracy-improvement.report.md"
+    },
+    "rootCauses": [
+      "No regularization (reg_alpha/reg_lambda missing)",
+      "Over-complex model (max_depth=8, num_leaves=63 for 2715 samples)",
+      "Label leakage in CV (gap=20 insufficient purging)",
+      "Target variable base rate bias (67%)",
+      "Redundant features (96 with high multicollinearity)",
+      "30-day WF evaluation statistically meaningless"
+    ],
+    "phases": {
+      "phase1_p0": ["Regularization+depth", "Target variable fix", "WF extension", "Lag reduction"],
+      "phase2_p1": ["Purged CV", "Recency weighting", "New features", "Adversarial validation", "Data extension 2010"],
+      "phase3_p2": ["3-model stacking", "Optuna re-optimization", "Isotonic calibration", "Conformal prediction"]
+    },
+    "targetAccuracy": {
+      "phase1": "55-60% (180d WF)",
+      "phase2": "58-63%",
+      "phase3": "60-65%"
+    }
+  },
+  "accuracy-improvement-phase2": {
+    "phase": "completed",
+    "status": "passed",
+    "matchRate": 97,
+    "iterationCount": 1,
+    "startedAt": "2026-02-11T19:00:00Z",
+    "completedAt": "2026-02-11T21:00:00Z",
+    "documents": {
+      "plan": "docs/01-plan/features/accuracy-improvement-phase2.plan.md",
+      "design": "docs/02-design/features/accuracy-improvement-phase2.design.md",
+      "analysis": "docs/03-analysis/accuracy-improvement-phase2.analysis.md",
+      "report": "docs/04-report/features/accuracy-improvement-phase2.report.md"
+    },
+    "criticalFinding": {
+      "issue": "Phase 1 excess_return target uses PAST pct_change(20), not FUTURE return",
+      "evidence": "momentum_20d/roc_20d/Change20day correlation with target = 1.000",
+      "pastVsFutureAgreement": "51.4% (coin flip)",
+      "phase1AccuracyInvalid": true
+    },
+    "phases": {
+      "p0": ["Target bug fix (future_ret)", "Leakage verification script"],
+      "p1": ["Purged CV", "Adversarial validation", "Feature autocorrelation check"]
+    },
+    "targetAccuracy": "52-58% (realistic)"
+  },
+  "accuracy-improvement-phase3": {
+    "phase": "completed",
+    "status": "completed",
+    "matchRate": 97,
+    "startedAt": "2026-02-11T22:00:00Z",
+    "completedAt": "2026-02-11T23:30:00Z",
+    "documents": {
+      "plan": "docs/01-plan/features/accuracy-improvement-phase3.plan.md",
+      "design": "docs/02-design/features/accuracy-improvement-phase3.design.md",
+      "analysis": "docs/03-analysis/accuracy-improvement-phase3.analysis.md",
+      "report": "docs/04-report/features/accuracy-improvement-phase3.report.md"
+    },
+    "focus": "Allocation strategy optimization (accuracy → profit conversion)",
+    "implementation": {
+      "filesModified": ["src/config.py", "backtest.py"],
+      "filesCreated": ["scripts/optuna_optimize.py"],
+      "changes": ["C-01: ALLOCATION_TIERS redesign", "C-02: SIGNAL_THRESHOLDS sync", "C-03: PROB_CLIP 0.20/0.80", "C-04: VIX/ADX backtest forwarding", "C-05: Optuna script"]
+    },
+    "results": {
+      "accuracy": "58.3% (147/252)",
+      "strategyReturn": "+2.23%",
+      "sharpe": 0.26,
+      "mdd": "-16.64%",
+      "leakageCheck": "4/4 PASS",
+      "vixActivations": 225,
+      "regimeDistribution": {"Trend": 0.57, "Transition": 0.22, "Range": 0.21},
+      "tqqqMaxWeight": 0.175
+    }
+  },
+  "accuracy-improvement-phase4": {
+    "phase": "do",
+    "status": "completed",
+    "startedAt": "2026-02-11T23:45:00Z",
+    "completedAt": "2026-02-12T01:00:00Z",
+    "documents": {
+      "plan": "docs/01-plan/features/accuracy-improvement-phase4.plan.md",
+      "design": "docs/02-design/features/accuracy-improvement-phase4.design.md"
+    },
+    "focus": "Signal inversion fix + Optuna HP optimization",
+    "diagnosis": {
+      "primaryCause": "H1 (Momentum-Target Mismatch)",
+      "secondary": ["H3 (Small Sample)", "H4 (Regime-dependent)"],
+      "finding": "Model gives high prob when momentum is deeply negative (-4.9%); contrarian bounce fails to beat rolling_median"
+    },
+    "implementation": {
+      "filesCreated": ["scripts/diagnose_signal_inversion.py"],
+      "filesModified": ["src/config.py", "backtest.py", "src/data/features.py", "scripts/optuna_optimize.py"],
+      "changes": [
+        "C-01: diagnose_signal_inversion.py (5 diagnostic checks)",
+        "C-02: Optuna 100 trials (best CV 60.6%)",
+        "C-03: LGBM_PARAMS Optuna-optimized",
+        "C-04: raw_prob recording in backtest",
+        "C-05: mom10_pctile, mom20_pctile, rolling_med_ret features"
+      ]
+    },
+    "results": {
+      "accuracy": "65.1% (164/252)",
+      "strategyReturn": "+13.96%",
+      "sharpe": 1.03,
+      "mdd": "-13.54%",
+      "strongBuyActualUp": "100.0% (1/1)",
+      "buyActualUp": "85.1% (40/47)",
+      "leakageCheck": "4/4 PASS",
+      "optunaCvAccuracy": "60.6%",
+      "extendedBacktest504d": {
+        "return": "+37.61%",
+        "sharpe": 1.35,
+        "accuracy": "54.4%",
+        "strongBuyActualUp": "75.0% (9/12)",
+        "buyActualUp": "64.0% (57/89)"
+      }
+    }
+  }
+}

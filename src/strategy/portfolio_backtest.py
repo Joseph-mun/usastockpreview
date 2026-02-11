@@ -1,9 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Portfolio backtest: simulate TQQQ/SPY allocation using model probabilities."""
+"""Portfolio backtest: simulate TQQQ/SPY allocation using model probabilities.
+
+Enhanced with:
+  - P0-2: Transaction costs (slippage + commission) on rebalance days
+  - P0-1/P1-2: VIX/ADX series forwarded to allocation logic
+"""
 
 import numpy as np
 import pandas as pd
 
+from src.config import TRANSACTION_COST_ENABLED, SLIPPAGE_PCT, COMMISSION_PCT
 from src.strategy.allocation import get_allocation, check_rebalance
 
 
@@ -12,6 +18,9 @@ def run_portfolio_backtest(
     nasdaq_prices: pd.Series,
     spy_prices: pd.Series,
     initial_capital: float = 10000.0,
+    vix_series: pd.Series = None,
+    adx_series: pd.Series = None,
+    include_costs: bool = TRANSACTION_COST_ENABLED,
 ) -> pd.DataFrame:
     """
     Simulate portfolio allocation over historical data.
@@ -33,17 +42,51 @@ def run_portfolio_backtest(
     portfolio_value = initial_capital
     current_tier = "Defensive"
     prev_prob = 0.5
+    total_costs = 0.0
+    vix_filter_activations = 0
+    prev_tqqq_w = 0.0
+    prev_spy_w = 0.30
 
     for date in common_dates:
         prob = float(probabilities.loc[date])
-        alloc = get_allocation(prob)
 
-        should_rebalance, _ = check_rebalance(prob, prev_prob, current_tier)
+        vix = None
+        if vix_series is not None and date in vix_series.index:
+            v = vix_series.loc[date]
+            if not (isinstance(v, float) and np.isnan(v)):
+                vix = float(v)
+
+        adx = None
+        if adx_series is not None and date in adx_series.index:
+            a = adx_series.loc[date]
+            if not (isinstance(a, float) and np.isnan(a)):
+                adx = float(a)
+
+        alloc = get_allocation(prob, vix=vix, adx=adx)
+
+        should_rebalance, rebal_reason = check_rebalance(
+            prob, prev_prob, current_tier, vix=vix, adx=adx,
+        )
+
         if should_rebalance:
             current_tier = alloc.tier_label
-            alloc = get_allocation(prob)
+            alloc = get_allocation(prob, vix=vix, adx=adx)
         else:
-            alloc = get_allocation(prev_prob)
+            alloc = get_allocation(prev_prob, vix=vix, adx=adx)
+
+        # Transaction costs on rebalance
+        day_cost = 0.0
+        if should_rebalance and include_costs:
+            turnover = (
+                abs(alloc.tqqq_weight - prev_tqqq_w)
+                + abs(alloc.spy_weight - prev_spy_w)
+            )
+            day_cost = turnover * (SLIPPAGE_PCT + COMMISSION_PCT)
+            portfolio_value *= (1 - day_cost)
+            total_costs += day_cost * portfolio_value
+
+        if alloc.vix_filter_label and alloc.vix_filter_label != "Low Vol":
+            vix_filter_activations += 1
 
         t_ret = float(tqqq_ret.get(date, 0)) if date in tqqq_ret.index and not np.isnan(tqqq_ret.get(date, 0)) else 0
         s_ret = float(spy_ret.get(date, 0)) if date in spy_ret.index and not np.isnan(spy_ret.get(date, 0)) else 0
@@ -67,8 +110,16 @@ def run_portfolio_backtest(
             "portfolio_daily_ret": port_ret,
             "portfolio_value": portfolio_value,
             "rebalanced": should_rebalance,
+            "transaction_cost": day_cost,
+            "vix": vix,
+            "adx": adx,
+            "vix_filter": alloc.vix_filter_label,
+            "regime": alloc.regime_label,
         })
+
         prev_prob = prob
+        prev_tqqq_w = alloc.tqqq_weight
+        prev_spy_w = alloc.spy_weight
 
     return pd.DataFrame(records)
 
@@ -89,7 +140,7 @@ def compute_backtest_metrics(df: pd.DataFrame, initial_capital: float = 10000.0)
     daily_ret = df["portfolio_daily_ret"]
     sharpe = float((daily_ret.mean() / daily_ret.std()) * np.sqrt(252)) if daily_ret.std() > 0 else 0
 
-    return {
+    metrics = {
         "total_return": float(total_return),
         "annualized_return": float(ann_return),
         "max_drawdown": max_drawdown,
@@ -99,6 +150,22 @@ def compute_backtest_metrics(df: pd.DataFrame, initial_capital: float = 10000.0)
         "n_trading_days": n_days,
         "final_value": float(df["portfolio_value"].iloc[-1]),
     }
+
+    if "transaction_cost" in df.columns:
+        total_costs = float(df["transaction_cost"].sum())
+        metrics["total_transaction_costs"] = total_costs
+        cost_free_return = total_return + total_costs
+        metrics["cost_drag_pct"] = float(total_costs / cost_free_return) if cost_free_return != 0 else 0.0
+
+    if "regime" in df.columns:
+        regime_counts = df["regime"].value_counts(normalize=True, dropna=False).to_dict()
+        metrics["regime_distribution"] = {k: v for k, v in regime_counts.items() if k is not None}
+
+    if "vix_filter" in df.columns:
+        vix_non_low = df["vix_filter"].apply(lambda x: x is not None and x != "Low Vol")
+        metrics["vix_filter_activations"] = int(vix_non_low.sum())
+
+    return metrics
 
 
 def compute_benchmark_returns(

@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -70,9 +69,10 @@ def upload_artifacts(verbose: bool = True):
             print(f"  {Path(f).name}")
 
     # gh release upload --clobber overwrites existing assets
+    # "--" prevents file paths from being parsed as CLI options
     _run_gh([
         "release", "upload", RELEASE_TAG,
-        "--clobber",
+        "--clobber", "--",
     ] + files_to_upload)
 
     if verbose:
@@ -115,12 +115,27 @@ def download_artifacts(verbose: bool = True):
         ])
 
         for fname in os.listdir(tmpdir):
-            src = os.path.join(tmpdir, fname)
+            # Path Traversal 방어: basename만 사용
+            safe_name = os.path.basename(fname)
+            if safe_name != fname or ".." in fname:
+                if verbose:
+                    print(f"  SKIPPED (unsafe name): {fname}")
+                continue
 
-            if fname.endswith(".zip"):
-                dst = SMA_CACHE_DIR / fname
+            src = os.path.join(tmpdir, safe_name)
+
+            if safe_name.endswith(".zip"):
+                dst = SMA_CACHE_DIR / safe_name
             else:
-                dst = MODEL_DIR / fname
+                dst = MODEL_DIR / safe_name
+
+            # 최종 경로가 허용 디렉토리 내에 있는지 검증
+            dst_resolved = dst.resolve()
+            if not (dst_resolved.is_relative_to(MODEL_DIR.resolve()) or
+                    dst_resolved.is_relative_to(SMA_CACHE_DIR.resolve())):
+                if verbose:
+                    print(f"  SKIPPED (path traversal): {fname}")
+                continue
 
             shutil.copy2(src, dst)
             if verbose:
