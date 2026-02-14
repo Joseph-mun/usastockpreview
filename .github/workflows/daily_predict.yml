@@ -61,4 +61,4 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           pip install boto3
-          python scripts/upload_s3.py
+          PYTHONPATH=. python scripts/upload_s3.py
