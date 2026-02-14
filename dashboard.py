@@ -20,8 +20,16 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 SIGNAL_PATH = DATA_DIR / "prediction_signal.json"
 HISTORY_PATH = DATA_DIR / "probability_history.csv"
 
-S3_BUCKET = os.environ.get("S3_BUCKET", "")
-S3_REGION = os.environ.get("S3_REGION", "ap-northeast-2")
+def _get_secret(key: str, default: str = "") -> str:
+    """Read from st.secrets (Streamlit Cloud) or os.environ (local)."""
+    try:
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        return os.environ.get(key, default)
+
+
+S3_BUCKET = _get_secret("S3_BUCKET")
+S3_REGION = _get_secret("S3_REGION", "ap-northeast-2")
 
 TIER_COLORS = {
     "Aggressive": "#ef4444",
@@ -35,8 +43,17 @@ TIER_COLORS = {
 
 
 def _get_s3_client():
-    """Create S3 client using env vars or Streamlit secrets."""
+    """Create S3 client using Streamlit secrets or env vars."""
     import boto3
+    aws_key = _get_secret("AWS_ACCESS_KEY_ID")
+    aws_secret = _get_secret("AWS_SECRET_ACCESS_KEY")
+    if aws_key and aws_secret:
+        return boto3.client(
+            "s3",
+            region_name=S3_REGION,
+            aws_access_key_id=aws_key,
+            aws_secret_access_key=aws_secret,
+        )
     return boto3.client("s3", region_name=S3_REGION)
 
 
