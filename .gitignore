@@ -27,3 +27,16 @@ Thumbs.db
 
 # Legacy model
 *.pkl
+
+# Generated data (ephemeral, managed via S3/Release)
+data/logs/
+data/prediction_signal.json
+data/probability_history.csv
+data/predictions_log.jsonl
+data/models/
+
+# Generated reports
+backtest_report.html
+
+# Claude Code
+.claude/

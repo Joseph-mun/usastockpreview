@@ -7,6 +7,7 @@ Phase 1 improvements (overfitting reduction):
   - Feature selection: averaged CV importances across all folds
 """
 
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,8 @@ from src.config import (
     LGBM_PARAMS, CV_N_SPLITS, CV_GAP, MODEL_DIR,
     CALIBRATION_ENABLED, CALIBRATION_METHOD,
     FEATURE_SELECTION_ENABLED, FEATURE_IMPORTANCE_TOP_N,
+    ENSEMBLE_ENABLED, ENSEMBLE_WEIGHTS, XGBOOST_PARAMS, CATBOOST_PARAMS,
+    PROB_CLIP_MIN, PROB_CLIP_MAX, get_logger,
 )
 
 # Early stopping validation split ratio (from end of training set)
@@ -272,6 +275,9 @@ class ModelTrainer:
             "calibration_method": self.calibration_method,
         }, model_path)
 
+        # Compute SHA-256 hash for integrity verification
+        model_hash = hashlib.sha256(model_path.read_bytes()).hexdigest()
+
         meta = {
             "index_name": self.index_name,
             "feature_columns": self.feature_columns,
@@ -279,6 +285,200 @@ class ModelTrainer:
             "cv_accuracy_std": round(float(np.std(self.cv_scores)), 4) if self.cv_scores else None,
             "n_features": len(self.feature_columns),
             "calibration_method": self.calibration_method,
+            "model_sha256": model_hash,
+            "saved_at": datetime.now().isoformat(),
+        }
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+
+        return str(model_path), str(meta_path)
+
+
+# ==================== Ensemble Trainer ====================
+
+_ensemble_logger = get_logger(__name__)
+
+
+class EnsembleTrainer:
+    """Train LightGBM + XGBoost + CatBoost ensemble with shared feature selection."""
+
+    def __init__(self, index_name: str):
+        self.index_name = index_name
+        self.models: dict[str, object] = {}
+        self.calibrators: dict[str, object] = {}
+        self.calibration_methods: dict[str, str] = {}
+        self.feature_columns: list[str] = []
+        self.cv_scores: dict[str, list[float]] = {}
+        self.ensemble_cv_score: float = 0.0
+
+    def train(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        status_callback=None,
+    ) -> dict:
+        """Train ensemble with shared feature selection from LightGBM.
+
+        Pipeline:
+          1. Train LightGBM with ModelTrainer (feature selection + calibration)
+          2. Use selected features to train XGBoost and CatBoost with CV
+          3. Calibrate each model separately
+          4. Compute ensemble CV accuracy
+        """
+        log = status_callback or (lambda msg: _ensemble_logger.info(msg))
+
+        # ── Step 1: LightGBM training (reuse ModelTrainer) ──
+        log(f"[{self.index_name}] Ensemble Step 1/4: LightGBM 학습")
+        lgbm_trainer = ModelTrainer(self.index_name)
+        lgbm_result = lgbm_trainer.train(X, y, status_callback=status_callback)
+        self.models["lightgbm"] = lgbm_trainer.model
+        self.calibrators["lightgbm"] = lgbm_trainer.calibrator
+        self.calibration_methods["lightgbm"] = lgbm_trainer.calibration_method
+        self.feature_columns = lgbm_trainer.feature_columns
+        self.cv_scores["lightgbm"] = lgbm_trainer.cv_scores
+
+        # Prepare selected features
+        X_sel = X[self.feature_columns].values.astype(np.float64)
+        y_arr = y.values.astype(int)
+
+        tscv = TimeSeriesSplit(n_splits=CV_N_SPLITS, gap=CV_GAP)
+
+        # ── Step 2: XGBoost training ──
+        log(f"[{self.index_name}] Ensemble Step 2/4: XGBoost 학습")
+        try:
+            from xgboost import XGBClassifier
+
+            xgb_scores = []
+            xgb_oof = np.full(len(y_arr), np.nan)
+
+            for fold, (train_idx, test_idx) in enumerate(tscv.split(X_sel)):
+                if len(train_idx) > CV_GAP:
+                    train_idx = train_idx[:-CV_GAP]
+                pure_train, val_idx = _split_train_val(train_idx)
+
+                xgb_model = XGBClassifier(**XGBOOST_PARAMS)
+                xgb_model.fit(
+                    X_sel[pure_train], y_arr[pure_train],
+                    eval_set=[(X_sel[val_idx], y_arr[val_idx])],
+                    verbose=False,
+                )
+                score = xgb_model.score(X_sel[test_idx], y_arr[test_idx])
+                xgb_scores.append(score)
+                xgb_oof[test_idx] = xgb_model.predict_proba(X_sel[test_idx])[:, 1]
+                log(f"  XGB Fold {fold + 1}/{CV_N_SPLITS}: accuracy={score:.4f}")
+
+            self.cv_scores["xgboost"] = xgb_scores
+
+            # Final XGBoost model
+            final_xgb = XGBClassifier(**XGBOOST_PARAMS)
+            final_xgb.fit(X_sel, y_arr)
+            self.models["xgboost"] = final_xgb
+
+            # Calibrate XGBoost
+            valid_xgb = ~np.isnan(xgb_oof)
+            if CALIBRATION_ENABLED and valid_xgb.sum() > 50:
+                cal = LogisticRegression()
+                cal.fit(xgb_oof[valid_xgb].reshape(-1, 1), y_arr[valid_xgb])
+                self.calibrators["xgboost"] = cal
+                self.calibration_methods["xgboost"] = "platt"
+
+            log(f"  XGBoost CV: {np.mean(xgb_scores):.4f} +/- {np.std(xgb_scores):.4f}")
+
+        except ImportError:
+            log("  WARNING: xgboost not installed, skipping")
+
+        # ── Step 3: CatBoost training ──
+        log(f"[{self.index_name}] Ensemble Step 3/4: CatBoost 학습")
+        try:
+            from catboost import CatBoostClassifier
+
+            cb_scores = []
+            cb_oof = np.full(len(y_arr), np.nan)
+
+            for fold, (train_idx, test_idx) in enumerate(tscv.split(X_sel)):
+                if len(train_idx) > CV_GAP:
+                    train_idx = train_idx[:-CV_GAP]
+                pure_train, val_idx = _split_train_val(train_idx)
+
+                cb_model = CatBoostClassifier(**CATBOOST_PARAMS)
+                cb_model.fit(
+                    X_sel[pure_train], y_arr[pure_train],
+                    eval_set=(X_sel[val_idx], y_arr[val_idx]),
+                    early_stopping_rounds=50,
+                )
+                score = cb_model.score(X_sel[test_idx], y_arr[test_idx])
+                cb_scores.append(score)
+                cb_oof[test_idx] = cb_model.predict_proba(X_sel[test_idx])[:, 1]
+                log(f"  CB Fold {fold + 1}/{CV_N_SPLITS}: accuracy={score:.4f}")
+
+            self.cv_scores["catboost"] = cb_scores
+
+            # Final CatBoost model
+            final_cb = CatBoostClassifier(**CATBOOST_PARAMS)
+            final_cb.fit(X_sel, y_arr)
+            self.models["catboost"] = final_cb
+
+            # Calibrate CatBoost
+            valid_cb = ~np.isnan(cb_oof)
+            if CALIBRATION_ENABLED and valid_cb.sum() > 50:
+                cal = LogisticRegression()
+                cal.fit(cb_oof[valid_cb].reshape(-1, 1), y_arr[valid_cb])
+                self.calibrators["catboost"] = cal
+                self.calibration_methods["catboost"] = "platt"
+
+            log(f"  CatBoost CV: {np.mean(cb_scores):.4f} +/- {np.std(cb_scores):.4f}")
+
+        except ImportError:
+            log("  WARNING: catboost not installed, skipping")
+
+        # ── Step 4: Ensemble CV score ──
+        log(f"[{self.index_name}] Ensemble Step 4/4: 앙상블 점수 계산")
+        all_scores = {k: np.mean(v) for k, v in self.cv_scores.items()}
+        active_weights = {k: ENSEMBLE_WEIGHTS.get(k, 0) for k in self.models}
+        total_w = sum(active_weights.values())
+        if total_w > 0:
+            self.ensemble_cv_score = sum(
+                all_scores.get(k, 0) * w / total_w for k, w in active_weights.items()
+            )
+
+        log(f"  Individual: {all_scores}")
+        log(f"  Ensemble weighted: {self.ensemble_cv_score:.4f}")
+
+        return {
+            "models": self.models,
+            "cv_scores": self.cv_scores,
+            "ensemble_cv_score": self.ensemble_cv_score,
+            "feature_columns": self.feature_columns,
+        }
+
+    def save(self, model_dir: str = None) -> tuple[str, str]:
+        """Save ensemble models, calibrators, and metadata."""
+        model_dir = Path(model_dir) if model_dir else MODEL_DIR
+        model_dir.mkdir(parents=True, exist_ok=True)
+
+        name_lower = self.index_name.lower()
+        model_path = model_dir / f"{name_lower}_ensemble.joblib"
+        meta_path = model_dir / f"{name_lower}_ensemble_meta.json"
+
+        joblib.dump({
+            "models": self.models,
+            "calibrators": self.calibrators,
+            "calibration_methods": self.calibration_methods,
+            "feature_columns": self.feature_columns,
+        }, model_path)
+
+        model_hash = hashlib.sha256(model_path.read_bytes()).hexdigest()
+
+        meta = {
+            "index_name": self.index_name,
+            "feature_columns": self.feature_columns,
+            "model_names": list(self.models.keys()),
+            "cv_scores": {k: [round(s, 4) for s in v] for k, v in self.cv_scores.items()},
+            "cv_means": {k: round(np.mean(v), 4) for k, v in self.cv_scores.items()},
+            "ensemble_cv_score": round(self.ensemble_cv_score, 4),
+            "ensemble_weights": {k: ENSEMBLE_WEIGHTS.get(k, 0) for k in self.models},
+            "n_features": len(self.feature_columns),
+            "model_sha256": model_hash,
             "saved_at": datetime.now().isoformat(),
         }
         with open(meta_path, "w", encoding="utf-8") as f:

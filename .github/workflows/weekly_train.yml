@@ -37,7 +37,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MAX_TICKERS: ${{ github.event.inputs.max_tickers || '500' }}
-        run: python -m src.pipelines.training_pipeline --max-tickers "$MAX_TICKERS"
+        run: python -m src.pipelines.training_pipeline --max-tickers "$MAX_TICKERS" --ensemble
 
       - name: Upload artifacts to GitHub Release
         env:

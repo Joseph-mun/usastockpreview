@@ -15,7 +15,10 @@ from src.config import (
     VIX_FILTER_TIERS,
     REGIME_DETECTION_ENABLED,
     REGIME_ADX_RANGE_THRESHOLD,
+    REGIME_ADX_TREND_THRESHOLD,
     REGIME_TQQQ_RANGE_PENALTY,
+    TQQQ_REDUCTION_SPY_RATIO,
+    TQQQ_REDUCTION_CASH_RATIO,
 )
 
 
@@ -29,10 +32,10 @@ class AllocationResult:
     probability: float
     rebalance_needed: bool
     reason: str
-    vix_level: float = None
-    vix_filter_label: str = None
-    adx_level: float = None
-    regime_label: str = None
+    vix_level: float | None = None
+    vix_filter_label: str | None = None
+    adx_level: float | None = None
+    regime_label: str | None = None
 
 
 def _lookup_tier(probability: float) -> tuple[float, float, float, str]:
@@ -43,7 +46,7 @@ def _lookup_tier(probability: float) -> tuple[float, float, float, str]:
     return 0.0, 0.30, 0.70, "Defensive"
 
 
-def _apply_vix_filter(base_tqqq: float, vix: float) -> tuple[float, str]:
+def _apply_vix_filter(base_tqqq: float, vix: float | None) -> tuple[float, str | None]:
     """Reduce TQQQ weight based on VIX level.
 
     Returns:
@@ -59,7 +62,7 @@ def _apply_vix_filter(base_tqqq: float, vix: float) -> tuple[float, str]:
     return 0.0, "Extreme Vol"
 
 
-def _apply_regime_adjustment(tqqq_weight: float, adx: float) -> tuple[float, str]:
+def _apply_regime_adjustment(tqqq_weight: float, adx: float | None) -> tuple[float, str | None]:
     """Adjust TQQQ weight based on ADX market regime.
 
     Trending (ADX > 25): no change (leverage benefits from trends)
@@ -74,7 +77,7 @@ def _apply_regime_adjustment(tqqq_weight: float, adx: float) -> tuple[float, str
 
     if adx < REGIME_ADX_RANGE_THRESHOLD:
         return tqqq_weight * REGIME_TQQQ_RANGE_PENALTY, "Range"
-    elif adx >= 25:
+    elif adx >= REGIME_ADX_TREND_THRESHOLD:
         return tqqq_weight, "Trend"
     else:
         return tqqq_weight, "Transition"
@@ -101,8 +104,8 @@ def get_allocation(
 
     tqqq_reduction = base_tqqq - adjusted_tqqq
     final_tqqq = adjusted_tqqq
-    final_spy = base_spy + tqqq_reduction * 0.6
-    final_cash = base_cash + tqqq_reduction * 0.4
+    final_spy = base_spy + tqqq_reduction * TQQQ_REDUCTION_SPY_RATIO
+    final_cash = base_cash + tqqq_reduction * TQQQ_REDUCTION_CASH_RATIO
 
     reason_parts = [f"Prob {probability*100:.1f}% -> {label}"]
     if vix is not None and vix_label:
@@ -147,7 +150,7 @@ def check_rebalance(
     return True, f"{current_tier} -> {new_alloc.tier_label} (delta: {prob_delta*100:+.1f}%p)"
 
 
-def format_allocation_text(alloc: AllocationResult, rebalance_info: tuple[bool, str] = None) -> str:
+def format_allocation_text(alloc: AllocationResult, rebalance_info: tuple[bool, str] | None = None) -> str:
     """Format allocation for Telegram display."""
     lines = [
         f"Tier: {alloc.tier_label}",

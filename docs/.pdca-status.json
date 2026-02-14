@@ -191,13 +191,16 @@
     }
   },
   "accuracy-improvement-phase4": {
-    "phase": "do",
-    "status": "completed",
+    "phase": "check",
+    "status": "passed",
+    "matchRate": 97,
+    "iterationCount": 1,
     "startedAt": "2026-02-11T23:45:00Z",
     "completedAt": "2026-02-12T01:00:00Z",
     "documents": {
       "plan": "docs/01-plan/features/accuracy-improvement-phase4.plan.md",
-      "design": "docs/02-design/features/accuracy-improvement-phase4.design.md"
+      "design": "docs/02-design/features/accuracy-improvement-phase4.design.md",
+      "analysis": "docs/03-analysis/accuracy-improvement-phase4.analysis.md"
     },
     "focus": "Signal inversion fix + Optuna HP optimization",
     "diagnosis": {

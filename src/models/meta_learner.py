@@ -12,6 +12,7 @@ Design:
 """
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -20,7 +21,9 @@ import numpy as np
 import pandas as pd
 from sklearn.neural_network import MLPClassifier
 
-from src.config import MODEL_DIR, META_LEARNER_HIDDEN, META_LEARNER_LR
+from src.config import MODEL_DIR, META_LEARNER_HIDDEN, META_LEARNER_LR, META_LEARNER_MAX_HISTORY, DEFAULT_PROBABILITY
+
+logger = logging.getLogger(__name__)
 
 
 class MetaLearner:
@@ -64,8 +67,8 @@ class MetaLearner:
         rsi: float = 50.0,
     ) -> np.ndarray:
         """Build feature vector for meta-learner prediction."""
-        probs = (recent_probs + [0.5] * 5)[:5]
-        actuals = (recent_actuals + [0.5] * 5)[:5]
+        probs = (recent_probs + [DEFAULT_PROBABILITY] * 5)[:5]
+        actuals = (recent_actuals + [DEFAULT_PROBABILITY] * 5)[:5]
         return np.array([lgbm_prob] + probs + actuals + [rsi / 100.0])
 
     def predict(self, features: np.ndarray) -> float:
@@ -76,7 +79,8 @@ class MetaLearner:
         try:
             prob = self.model.predict_proba(features.reshape(1, -1))[0]
             return float(prob[1]) if len(prob) > 1 else float(prob[0])
-        except Exception:
+        except (ValueError, IndexError) as e:
+            logger.warning("MetaLearner predict fallback: %s", e)
             return float(features[0])
 
     def update(self, features: np.ndarray, actual: int):
@@ -106,8 +110,7 @@ class MetaLearner:
             "is_fitted": self.is_fitted,
         }, self.model_path)
 
-        # Keep only last 500 history entries
-        recent = self.history[-500:]
+        recent = self.history[-META_LEARNER_MAX_HISTORY:]
         with open(self.history_path, "w", encoding="utf-8") as f:
             json.dump(recent, f)
 
@@ -126,7 +129,8 @@ class MetaLearner:
                     self.history = json.load(f)
 
             return True
-        except Exception:
+        except (OSError, KeyError, json.JSONDecodeError) as e:
+            logger.warning("MetaLearner load failed: %s", e)
             return False
 
     def get_recent_actuals(self, n: int = 5) -> list[float]:

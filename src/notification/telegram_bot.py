@@ -6,7 +6,9 @@ import time
 
 import requests
 
-from src.config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+from src.config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, get_logger
+
+logger = get_logger(__name__)
 
 API_BASE = "https://api.telegram.org/bot{token}"
 
@@ -31,8 +33,8 @@ class TelegramNotifier:
             resp = requests.post(url, json=payload, timeout=30)
             resp.raise_for_status()
             return resp.json().get("ok", False)
-        except Exception as e:
-            print(f"Telegram sendMessage failed: {e}")
+        except requests.RequestException as e:
+            logger.error("Telegram sendMessage failed: %s", e)
             return False
 
     def send_photo(self, image_bytes: bytes, caption: str = None) -> bool:
@@ -47,8 +49,8 @@ class TelegramNotifier:
             resp = requests.post(url, data=data, files=files, timeout=60)
             resp.raise_for_status()
             return resp.json().get("ok", False)
-        except Exception as e:
-            print(f"Telegram sendPhoto failed: {e}")
+        except requests.RequestException as e:
+            logger.error("Telegram sendPhoto failed: %s", e)
             return False
 
     def send_prediction_report(

@@ -4,13 +4,98 @@
 Enhanced with:
   - P0-2: Transaction costs (slippage + commission) on rebalance days
   - P0-1/P1-2: VIX/ADX series forwarded to allocation logic
+  - Risk management: stop-loss, MDD circuit breaker, volatility targeting, position aging
 """
 
 import numpy as np
 import pandas as pd
 
-from src.config import TRANSACTION_COST_ENABLED, SLIPPAGE_PCT, COMMISSION_PCT
-from src.strategy.allocation import get_allocation, check_rebalance
+from src.config import (
+    TRANSACTION_COST_ENABLED, SLIPPAGE_PCT, COMMISSION_PCT,
+    TQQQ_REDUCTION_SPY_RATIO, TQQQ_REDUCTION_CASH_RATIO,
+    STOP_LOSS_ENABLED, STOP_LOSS_THRESHOLD,
+    MDD_CIRCUIT_BREAKER_ENABLED, MDD_CIRCUIT_BREAKER_THRESHOLD, MDD_CIRCUIT_BREAKER_RECOVERY,
+    VOL_TARGETING_ENABLED, VOL_TARGET_ANNUAL, VOL_LOOKBACK_DAYS, VOL_SCALE_MIN, VOL_SCALE_MAX,
+    POSITION_AGING_ENABLED, POSITION_AGING_DECAY_RATE, POSITION_AGING_MAX_DAYS,
+)
+from src.strategy.allocation import AllocationResult, get_allocation, check_rebalance
+
+
+def _safe_float(series: pd.Series, date, default=None) -> float | None:
+    """Safely extract a float value from a series at given date."""
+    if series is None or date not in series.index:
+        return default
+    v = series.loc[date]
+    if isinstance(v, float) and np.isnan(v):
+        return default
+    return float(v)
+
+
+def _apply_position_aging(
+    alloc: AllocationResult,
+    days_since_change: int,
+) -> AllocationResult:
+    """Apply position aging decay to TQQQ weight."""
+    if not POSITION_AGING_ENABLED or days_since_change <= 0:
+        return alloc
+    if alloc.tqqq_weight <= 0 or days_since_change > POSITION_AGING_MAX_DAYS:
+        return alloc
+
+    decay_factor = (1 - POSITION_AGING_DECAY_RATE) ** days_since_change
+    aged_tqqq = alloc.tqqq_weight * decay_factor
+    reduction = alloc.tqqq_weight - aged_tqqq
+
+    return AllocationResult(
+        tqqq_weight=round(aged_tqqq, 4),
+        spy_weight=round(alloc.spy_weight + reduction * TQQQ_REDUCTION_SPY_RATIO, 4),
+        cash_weight=round(alloc.cash_weight + reduction * TQQQ_REDUCTION_CASH_RATIO, 4),
+        tier_label=alloc.tier_label,
+        probability=alloc.probability,
+        rebalance_needed=alloc.rebalance_needed,
+        reason=alloc.reason,
+        vix_level=alloc.vix_level,
+        vix_filter_label=alloc.vix_filter_label,
+        adx_level=alloc.adx_level,
+        regime_label=alloc.regime_label,
+    )
+
+
+def _apply_vol_targeting(
+    alloc: AllocationResult,
+    daily_returns: list[float],
+) -> tuple[AllocationResult, float]:
+    """Scale risky asset weights by target_vol / realized_vol.
+
+    Returns (adjusted_alloc, vol_scale_factor).
+    """
+    if not VOL_TARGETING_ENABLED or len(daily_returns) < VOL_LOOKBACK_DAYS:
+        return alloc, 1.0
+
+    recent = np.array(daily_returns[-VOL_LOOKBACK_DAYS:])
+    realized_vol = float(recent.std() * np.sqrt(252))
+    if realized_vol <= 0:
+        return alloc, 1.0
+
+    vol_scale = np.clip(VOL_TARGET_ANNUAL / realized_vol, VOL_SCALE_MIN, VOL_SCALE_MAX)
+
+    scaled_tqqq = alloc.tqqq_weight * vol_scale
+    scaled_spy = alloc.spy_weight * vol_scale
+    scaled_cash = 1.0 - scaled_tqqq - scaled_spy
+    scaled_cash = max(scaled_cash, 0.0)
+
+    return AllocationResult(
+        tqqq_weight=round(scaled_tqqq, 4),
+        spy_weight=round(scaled_spy, 4),
+        cash_weight=round(scaled_cash, 4),
+        tier_label=alloc.tier_label,
+        probability=alloc.probability,
+        rebalance_needed=alloc.rebalance_needed,
+        reason=alloc.reason,
+        vix_level=alloc.vix_level,
+        vix_filter_label=alloc.vix_filter_label,
+        adx_level=alloc.adx_level,
+        regime_label=alloc.regime_label,
+    ), float(vol_scale)
 
 
 def run_portfolio_backtest(
@@ -26,6 +111,7 @@ def run_portfolio_backtest(
     Simulate portfolio allocation over historical data.
 
     TQQQ return approximated as 3x daily NASDAQ return.
+    Risk management: stop-loss, MDD circuit breaker, volatility targeting, position aging.
     """
     common_dates = (
         probabilities.index
@@ -40,6 +126,7 @@ def run_portfolio_backtest(
 
     records = []
     portfolio_value = initial_capital
+    portfolio_peak = initial_capital
     current_tier = "Defensive"
     prev_prob = 0.5
     total_costs = 0.0
@@ -47,21 +134,55 @@ def run_portfolio_backtest(
     prev_tqqq_w = 0.0
     prev_spy_w = 0.30
 
+    # Risk management state
+    circuit_breaker_active = False
+    stop_loss_active = False
+    days_since_tier_change = 0
+    position_entry_value = initial_capital
+    daily_returns_history: list[float] = []
+
     for date in common_dates:
         prob = float(probabilities.loc[date])
+        vix = _safe_float(vix_series, date)
+        adx = _safe_float(adx_series, date)
 
-        vix = None
-        if vix_series is not None and date in vix_series.index:
-            v = vix_series.loc[date]
-            if not (isinstance(v, float) and np.isnan(v)):
-                vix = float(v)
+        # ── Risk Check A: MDD Circuit Breaker ──
+        stop_loss_triggered = False
+        vol_scale = 1.0
 
-        adx = None
-        if adx_series is not None and date in adx_series.index:
-            a = adx_series.loc[date]
-            if not (isinstance(a, float) and np.isnan(a)):
-                adx = float(a)
+        if MDD_CIRCUIT_BREAKER_ENABLED and circuit_breaker_active:
+            if portfolio_value >= portfolio_peak * MDD_CIRCUIT_BREAKER_RECOVERY:
+                circuit_breaker_active = False
+            else:
+                alloc = AllocationResult(
+                    tqqq_weight=0.0, spy_weight=0.0, cash_weight=1.0,
+                    tier_label="Circuit Breaker", probability=prob,
+                    rebalance_needed=False, reason="MDD Circuit Breaker Active",
+                )
+                t_ret = _safe_float(tqqq_ret, date, 0.0) or 0.0
+                s_ret = _safe_float(spy_ret, date, 0.0) or 0.0
+                port_ret = 0.0  # 100% cash
+                portfolio_value *= (1 + port_ret)
+                daily_returns_history.append(port_ret)
 
+                records.append({
+                    "date": date, "probability": prob, "tier": "Circuit Breaker",
+                    "tqqq_weight": 0.0, "spy_weight": 0.0, "cash_weight": 1.0,
+                    "tqqq_daily_ret": t_ret, "spy_daily_ret": s_ret,
+                    "portfolio_daily_ret": port_ret, "portfolio_value": portfolio_value,
+                    "rebalanced": False, "transaction_cost": 0.0,
+                    "vix": vix, "adx": adx,
+                    "vix_filter": None, "regime": None,
+                    "stop_loss_triggered": False,
+                    "circuit_breaker_active": True,
+                    "position_aging_days": 0, "vol_scale": 1.0,
+                })
+                prev_prob = prob
+                prev_tqqq_w = 0.0
+                prev_spy_w = 0.0
+                continue
+
+        # ── Normal allocation ──
         alloc = get_allocation(prob, vix=vix, adx=adx)
 
         should_rebalance, rebal_reason = check_rebalance(
@@ -71,8 +192,34 @@ def run_portfolio_backtest(
         if should_rebalance:
             current_tier = alloc.tier_label
             alloc = get_allocation(prob, vix=vix, adx=adx)
+            days_since_tier_change = 0
+            stop_loss_active = False
+            position_entry_value = portfolio_value
         else:
             alloc = get_allocation(prev_prob, vix=vix, adx=adx)
+            days_since_tier_change += 1
+
+        # ── Risk Check B: Stop Loss ──
+        if STOP_LOSS_ENABLED and stop_loss_active and alloc.tqqq_weight > 0:
+            alloc = AllocationResult(
+                tqqq_weight=0.0,
+                spy_weight=round(alloc.spy_weight + alloc.tqqq_weight * TQQQ_REDUCTION_SPY_RATIO, 4),
+                cash_weight=round(alloc.cash_weight + alloc.tqqq_weight * TQQQ_REDUCTION_CASH_RATIO, 4),
+                tier_label=alloc.tier_label,
+                probability=alloc.probability,
+                rebalance_needed=alloc.rebalance_needed,
+                reason="Stop Loss Active",
+                vix_level=alloc.vix_level,
+                vix_filter_label=alloc.vix_filter_label,
+                adx_level=alloc.adx_level,
+                regime_label=alloc.regime_label,
+            )
+
+        # ── Risk Check C: Position Aging ──
+        alloc = _apply_position_aging(alloc, days_since_tier_change)
+
+        # ── Risk Check D: Volatility Targeting ──
+        alloc, vol_scale = _apply_vol_targeting(alloc, daily_returns_history)
 
         # Transaction costs on rebalance
         day_cost = 0.0
@@ -88,8 +235,8 @@ def run_portfolio_backtest(
         if alloc.vix_filter_label and alloc.vix_filter_label != "Low Vol":
             vix_filter_activations += 1
 
-        t_ret = float(tqqq_ret.get(date, 0)) if date in tqqq_ret.index and not np.isnan(tqqq_ret.get(date, 0)) else 0
-        s_ret = float(spy_ret.get(date, 0)) if date in spy_ret.index and not np.isnan(spy_ret.get(date, 0)) else 0
+        t_ret = _safe_float(tqqq_ret, date, 0.0) or 0.0
+        s_ret = _safe_float(spy_ret, date, 0.0) or 0.0
 
         port_ret = (
             alloc.tqqq_weight * t_ret
@@ -97,6 +244,27 @@ def run_portfolio_backtest(
             + alloc.cash_weight * 0
         )
         portfolio_value *= (1 + port_ret)
+        daily_returns_history.append(port_ret)
+
+        # Update portfolio peak
+        if portfolio_value > portfolio_peak:
+            portfolio_peak = portfolio_value
+
+        # ── Post-return risk checks ──
+
+        # MDD circuit breaker trigger
+        if MDD_CIRCUIT_BREAKER_ENABLED and not circuit_breaker_active:
+            drawdown = (portfolio_value - portfolio_peak) / portfolio_peak
+            if drawdown < -MDD_CIRCUIT_BREAKER_THRESHOLD:
+                circuit_breaker_active = True
+
+        # Stop loss trigger (based on TQQQ position loss since entry)
+        if (STOP_LOSS_ENABLED and not stop_loss_active
+                and alloc.tqqq_weight > 0 and position_entry_value > 0):
+            tqqq_pnl = (portfolio_value - position_entry_value) / position_entry_value
+            if tqqq_pnl < -STOP_LOSS_THRESHOLD:
+                stop_loss_active = True
+                stop_loss_triggered = True
 
         records.append({
             "date": date,
@@ -115,6 +283,10 @@ def run_portfolio_backtest(
             "adx": adx,
             "vix_filter": alloc.vix_filter_label,
             "regime": alloc.regime_label,
+            "stop_loss_triggered": stop_loss_triggered,
+            "circuit_breaker_active": circuit_breaker_active,
+            "position_aging_days": days_since_tier_change,
+            "vol_scale": vol_scale,
         })
 
         prev_prob = prob
@@ -164,6 +336,23 @@ def compute_backtest_metrics(df: pd.DataFrame, initial_capital: float = 10000.0)
     if "vix_filter" in df.columns:
         vix_non_low = df["vix_filter"].apply(lambda x: x is not None and x != "Low Vol")
         metrics["vix_filter_activations"] = int(vix_non_low.sum())
+
+    # Risk management metrics
+    if "stop_loss_triggered" in df.columns:
+        metrics["stop_loss_count"] = int(df["stop_loss_triggered"].sum())
+
+    if "circuit_breaker_active" in df.columns:
+        metrics["circuit_breaker_days"] = int(df["circuit_breaker_active"].sum())
+
+    if "position_aging_days" in df.columns:
+        aging = df[df["position_aging_days"] > 0]["position_aging_days"]
+        metrics["avg_position_aging_days"] = float(aging.mean()) if not aging.empty else 0.0
+
+    if "vol_scale" in df.columns:
+        vs = df["vol_scale"]
+        metrics["avg_vol_scale"] = float(vs.mean())
+        metrics["min_vol_scale"] = float(vs.min())
+        metrics["max_vol_scale"] = float(vs.max())
 
     return metrics
 

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Global configuration for US Market Predictor."""
 
+import logging
 import os
 from pathlib import Path
 
@@ -10,6 +11,27 @@ DATA_DIR = PROJECT_ROOT / "data"
 MODEL_DIR = DATA_DIR / "models"
 SMA_CACHE_DIR = DATA_DIR / "sma_cache"
 LOG_DIR = DATA_DIR / "logs"
+
+# ==================== Logging ====================
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+_LOG_FORMAT = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+_LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format=_LOG_FORMAT,
+    datefmt=_LOG_DATE_FORMAT,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_DIR / "app.log", encoding="utf-8"),
+    ],
+)
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Get a named logger for a module."""
+    return logging.getLogger(name)
 
 # ==================== Index Definitions ====================
 INDEX_CONFIGS = {
@@ -149,3 +171,82 @@ COMMISSION_PCT = 0.0001    # 0.01% one-way commission
 # Phase 3: Narrowed range for calibrated probabilities (prevents extreme allocation)
 PROB_CLIP_MIN = 0.20
 PROB_CLIP_MAX = 0.80
+
+# ==================== Decision Thresholds ====================
+DECISION_THRESHOLD = 0.5  # binary decision boundary for up/down classification
+DEFAULT_PROBABILITY = 0.5  # fallback when prediction unavailable
+
+# ==================== Backtest ====================
+MIN_TRAINING_SAMPLES = 500  # minimum training samples for walk-forward backtest
+
+# ==================== TQQQ Reduction Redistribution ====================
+TQQQ_REDUCTION_SPY_RATIO = 0.6   # 60% of TQQQ reduction goes to SPY
+TQQQ_REDUCTION_CASH_RATIO = 0.4  # 40% of TQQQ reduction goes to Cash
+
+# ==================== Meta Learner Limits ====================
+META_LEARNER_MAX_HISTORY = 500  # max history entries to keep
+
+# ==================== Risk Management ====================
+# Stop Loss: exit TQQQ if cumulative loss exceeds threshold
+STOP_LOSS_ENABLED = True
+STOP_LOSS_THRESHOLD = 0.10          # 10% TQQQ loss triggers forced exit
+
+# MDD Circuit Breaker: go 100% cash if portfolio drawdown exceeds limit
+MDD_CIRCUIT_BREAKER_ENABLED = True
+MDD_CIRCUIT_BREAKER_THRESHOLD = 0.20  # -20% portfolio drawdown limit
+MDD_CIRCUIT_BREAKER_RECOVERY = 0.95   # resume when portfolio recovers to 95% of peak
+
+# Volatility Targeting: scale risky assets to maintain target volatility
+VOL_TARGETING_ENABLED = True
+VOL_TARGET_ANNUAL = 0.15            # 15% annualized target volatility
+VOL_LOOKBACK_DAYS = 20              # realized vol calculation window
+VOL_SCALE_MIN = 0.5                 # minimum scale factor
+VOL_SCALE_MAX = 1.5                 # maximum scale factor
+
+# Position Aging: decay TQQQ weight over time to reduce stale signal risk
+POSITION_AGING_ENABLED = True
+POSITION_AGING_DECAY_RATE = 0.02    # 2% daily decay
+POSITION_AGING_MAX_DAYS = 10        # max days before full decay
+
+# ==================== Fear & Greed Index ====================
+FEAR_GREED_ENABLED = True
+FEAR_GREED_API_URL = "https://api.alternative.me/fng/?limit=0&format=json"
+FEAR_GREED_CHANGE_PERIODS = [5, 10]
+
+# ==================== Sector Rotation ====================
+SECTOR_ROTATION_ENABLED = True
+SECTOR_ETFS = {"XLK": "tech", "XLF": "fin", "XLE": "energy", "XLU": "util"}
+SECTOR_LOOKBACK = [5, 20, 60]
+
+# ==================== Economic Calendar ====================
+ECON_CALENDAR_ENABLED = True
+ECON_EVENT_WINDOW_DAYS = 3
+
+# ==================== Ensemble Models ====================
+ENSEMBLE_ENABLED = True
+ENSEMBLE_WEIGHTS = {"lightgbm": 0.4, "xgboost": 0.3, "catboost": 0.3}
+
+XGBOOST_PARAMS = {
+    "objective": "binary:logistic",
+    "max_depth": 3,
+    "learning_rate": 0.037,
+    "n_estimators": 500,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_alpha": 2.2,
+    "reg_lambda": 5.2,
+    "random_state": 42,
+    "n_jobs": -1,
+    "verbosity": 0,
+}
+
+CATBOOST_PARAMS = {
+    "iterations": 500,
+    "depth": 3,
+    "learning_rate": 0.037,
+    "l2_leaf_reg": 5.2,
+    "subsample": 0.8,
+    "random_state": 42,
+    "verbose": False,
+    "allow_writing_files": False,
+}

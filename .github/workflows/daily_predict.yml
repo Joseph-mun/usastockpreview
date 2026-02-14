@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   predict:
@@ -32,33 +32,33 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python -m src.models.storage download
 
+      - name: Download probability history
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data
+          gh release download model-latest \
+            --pattern "probability_history.csv" \
+            --dir data/ --clobber 2>/dev/null || echo "No history yet, starting fresh"
+
       - name: Run daily prediction
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python -m src.pipelines.daily_pipeline
 
-      - name: Upload prediction signal to S3
+      - name: Upload history to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f data/probability_history.csv ]; then
+            gh release upload model-latest data/probability_history.csv --clobber
+          fi
+
+      - name: Upload to S3
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           pip install boto3
-          python -c "
-          import boto3
-          from src.config import DATA_DIR
-
-          signal_path = DATA_DIR / 'prediction_signal.json'
-          if not signal_path.exists():
-              print('WARNING: prediction_signal.json not found, skipping S3 upload')
-              exit(0)
-
-          s3 = boto3.client('s3', region_name='ap-northeast-2')
-          s3.upload_file(
-              str(signal_path),
-              'alloc-trading-signals',
-              'prediction_signal.json',
-              ExtraArgs={'ContentType': 'application/json'},
-          )
-          print(f'Uploaded {signal_path} to s3://alloc-trading-signals/prediction_signal.json')
-          "
+          python scripts/upload_s3.py

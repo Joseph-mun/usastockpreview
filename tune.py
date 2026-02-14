@@ -17,6 +17,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 import lightgbm as lgb
 import optuna
+
+from src.config import get_logger
+
+logger = get_logger(__name__)
 from sklearn.model_selection import TimeSeriesSplit
 
 import src.config as config
@@ -100,9 +104,9 @@ def make_objective(X_arr, y_arr, gap):
 
 def run_lookahead_experiment(sma_ratios, params, candidates=(5, 10, 15, 20)):
     """Test different target lookahead values."""
-    print("\n" + "=" * 60)
-    print("  Target Lookahead Experiment")
-    print("=" * 60)
+    logger.info("\n" + "=" * 60)
+    logger.info("  Target Lookahead Experiment")
+    logger.info("=" * 60)
 
     results = []
     for days in candidates:
@@ -113,17 +117,14 @@ def run_lookahead_experiment(sma_ratios, params, candidates=(5, 10, 15, 20)):
         mean_acc, std_acc = cv_score(X_arr, y_arr, params, gap=days, top_n=30)
         edge = mean_acc - base_rate
         results.append((days, mean_acc, std_acc, base_rate, edge, len(y)))
-        print(
-            f"  Lookahead={days:2d}d | "
-            f"CV={mean_acc:.4f}±{std_acc:.4f} | "
-            f"base={base_rate:.3f} | "
-            f"edge={edge:+.4f} | "
-            f"samples={len(y)}"
+        logger.info(
+            "  Lookahead=%2dd | CV=%.4f±%.4f | base=%.3f | edge=%+.4f | samples=%d",
+            days, mean_acc, std_acc, base_rate, edge, len(y),
         )
 
     # Best by edge over base rate
     best = max(results, key=lambda r: r[4])
-    print(f"\n  Best: {best[0]}d (edge={best[4]:+.4f})")
+    logger.info("  Best: %dd (edge=%+.4f)", best[0], best[4])
     return results
 
 
@@ -136,7 +137,7 @@ def main():
     start = time.time()
 
     # Load SMA data
-    print("1. SMA 캐시 로드...")
+    logger.info("1. SMA 캐시 로드...")
     cache = SMACache()
     raw_sma, _ = cache.load()
     sma_ratios = {}
@@ -144,27 +145,27 @@ def main():
         collector = SMACollector()
         collector.raw_dataframes = raw_sma
         sma_ratios = collector.compute_ratios()
-        print(f"   SMA 캐시 로드 완료")
+        logger.info("   SMA 캐시 로드 완료")
     else:
-        print("   WARNING: SMA 캐시 없음 - SMA 비율 기본값 사용")
+        logger.warning("   SMA 캐시 없음 - SMA 비율 기본값 사용")
 
     # Build dataset (default lookahead)
-    print("2. 데이터셋 구축...")
+    logger.info("2. 데이터셋 구축...")
     X, y = build_dataset(sma_ratios)
     X_arr = X.values.astype(np.float64)
     y_arr = y.values.astype(int)
-    print(f"   {len(X)} samples, {X.shape[1]} features, base_rate={y_arr.mean():.3f}")
+    logger.info("   %d samples, %d features, base_rate=%.3f", len(X), X.shape[1], y_arr.mean())
 
     # Current params baseline
-    print("\n3. 현재 파라미터 기준선...")
+    logger.info("3. 현재 파라미터 기준선...")
     current_params = config.LGBM_PARAMS.copy()
     gap = config.TARGET_LOOKAHEAD_DAYS
     base_mean, base_std = cv_score(X_arr, y_arr, current_params, gap=gap, top_n=30)
-    print(f"   Current CV: {base_mean:.4f} ± {base_std:.4f}")
+    logger.info("   Current CV: %.4f ± %.4f", base_mean, base_std)
 
     if not args.lookahead_only:
         # Optuna tuning
-        print(f"\n4. Optuna 하이퍼파라미터 탐색 ({args.n_trials} trials)...")
+        logger.info("4. Optuna 하이퍼파라미터 탐색 (%d trials)...", args.n_trials)
         study = optuna.create_study(direction="maximize")
         study.optimize(
             make_objective(X_arr, y_arr, gap),
@@ -173,20 +174,24 @@ def main():
         )
 
         best = study.best_trial
-        print(f"\n   Best CV accuracy: {best.value:.4f}")
-        print(f"   Best params:")
+        logger.info("   Best CV accuracy: %.4f", best.value)
+        logger.info("   Best params:")
         for k, v in sorted(best.params.items()):
-            print(f"     {k}: {v}")
+            logger.info("     %s: %s", k, v)
 
         # Compare
         delta = best.value - base_mean
-        print(f"\n   Improvement over current: {delta:+.4f} ({delta*100:+.2f}%p)")
+        logger.info("   Improvement over current: %+.4f (%+.2f%%p)", delta, delta * 100)
 
         # Top 5 trials
-        print("\n   Top 5 trials:")
+        logger.info("   Top 5 trials:")
         sorted_trials = sorted(study.trials, key=lambda t: t.value, reverse=True)
         for i, t in enumerate(sorted_trials[:5]):
-            print(f"     #{i+1} CV={t.value:.4f} | depth={t.params.get('max_depth')} leaves={t.params.get('num_leaves')} lr={t.params.get('learning_rate',0):.4f} top_n={t.params.get('top_n_features')}")
+            logger.info(
+                "     #%d CV=%.4f | depth=%s leaves=%s lr=%.4f top_n=%s",
+                i + 1, t.value, t.params.get("max_depth"), t.params.get("num_leaves"),
+                t.params.get("learning_rate", 0), t.params.get("top_n_features"),
+            )
 
         # Build best params dict for config.py
         bp = best.params.copy()
@@ -200,18 +205,18 @@ def main():
         }
         best_params.update(bp)
 
-        print(f"\n   Suggested config.py update:")
-        print(f"   LGBM_PARAMS = {best_params}")
-        print(f"   FEATURE_IMPORTANCE_TOP_N = {top_n}")
+        logger.info("   Suggested config.py update:")
+        logger.info("   LGBM_PARAMS = %s", best_params)
+        logger.info("   FEATURE_IMPORTANCE_TOP_N = %d", top_n)
     else:
         best_params = current_params
 
     # Lookahead experiment
-    print("\n5. Target Lookahead 실험...")
+    logger.info("5. Target Lookahead 실험...")
     run_lookahead_experiment(sma_ratios, best_params)
 
     elapsed = time.time() - start
-    print(f"\n완료 (소요: {elapsed/60:.1f}분)")
+    logger.info("완료 (소요: %.1f분)", elapsed / 60)
 
 
 if __name__ == "__main__":

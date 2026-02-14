@@ -13,6 +13,11 @@ import pandas as pd
 from src.config import SMA_CACHE_DIR
 
 
+MAX_ZIP_SIZE_BYTES = 500 * 1024 * 1024   # 500 MB
+MAX_ENTRY_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB per entry
+MAX_ENTRIES = 1000
+
+
 class SMACache:
     """Manage SMA data cache as CSV zip files."""
 
@@ -64,15 +69,36 @@ class SMACache:
             if zip_path is None:
                 return {}, {}
 
+        zip_file_size = Path(zip_path).stat().st_size
+        if zip_file_size > MAX_ZIP_SIZE_BYTES:
+            raise ValueError(
+                f"ZIP file too large: {zip_file_size / 1024 / 1024:.1f} MB "
+                f"(limit: {MAX_ZIP_SIZE_BYTES / 1024 / 1024:.0f} MB)"
+            )
+
         sma = {}
         meta = {}
         with zipfile.ZipFile(zip_path, mode="r") as zf:
-            if "meta.json" in zf.namelist():
+            entries = zf.namelist()
+            if len(entries) > MAX_ENTRIES:
+                raise ValueError(
+                    f"ZIP has too many entries: {len(entries)} (limit: {MAX_ENTRIES})"
+                )
+
+            if "meta.json" in entries:
                 meta = json.loads(zf.read("meta.json").decode("utf-8"))
 
-            for name in zf.namelist():
+            for name in entries:
                 if not name.lower().endswith(".csv"):
                     continue
+
+                info = zf.getinfo(name)
+                if info.file_size > MAX_ENTRY_SIZE_BYTES:
+                    raise ValueError(
+                        f"ZIP entry too large: {name} = {info.file_size / 1024 / 1024:.1f} MB "
+                        f"(limit: {MAX_ENTRY_SIZE_BYTES / 1024 / 1024:.0f} MB)"
+                    )
+
                 key = os.path.splitext(os.path.basename(name))[0]
                 df = pd.read_csv(io.BytesIO(zf.read(name)))
                 if "Date" in df.columns:
@@ -98,5 +124,5 @@ class SMACache:
             cache_date = datetime.strptime(date_str, "%Y%m%d").date()
             age = (datetime.now().date() - cache_date).days
             return age <= max_age_days
-        except Exception:
+        except (ValueError, IndexError, OSError):
             return False

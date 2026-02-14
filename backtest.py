@@ -19,7 +19,12 @@ import matplotlib.pyplot as plt
 
 from src.config import (
     INDEX_CONFIGS, TARGET_LOOKAHEAD_DAYS, SIGNAL_THRESHOLDS, LGBM_PARAMS,
+    DECISION_THRESHOLD, MIN_TRAINING_SAMPLES,
+    get_logger,
 )
+
+logger = get_logger(__name__)
+from src.data import get_close_col
 from src.data.collectors import SMACollector, get_spy_data
 from src.data.features import DatasetBuilder
 from src.data.cache import SMACache
@@ -27,6 +32,7 @@ from src.strategy.allocation import get_allocation
 from src.strategy.portfolio_backtest import (
     run_portfolio_backtest, compute_backtest_metrics, compute_benchmark_returns,
 )
+from src.templates import load_template
 
 
 def run_backtest(backtest_days: int = 252, retrain_freq: int = 60, verbose: bool = True):
@@ -38,7 +44,7 @@ def run_backtest(backtest_days: int = 252, retrain_freq: int = 60, verbose: bool
     """
     def log(msg):
         if verbose:
-            print(msg)
+            logger.info(msg)
 
     index_name = "NASDAQ"
     cfg = INDEX_CONFIGS[index_name]
@@ -64,10 +70,10 @@ def run_backtest(backtest_days: int = 252, retrain_freq: int = 60, verbose: bool
     log(f"   기간: {spy.index[0].strftime('%Y-%m-%d')} ~ {spy.index[-1].strftime('%Y-%m-%d')}")
     log(f"   Target=1 비율: {y.mean():.3f}")
 
-    close_col = "Adj Close" if "Adj Close" in spy.columns else "Close"
+    close_col = get_close_col(spy)
 
     # 3. Expanding Walk-Forward
-    eval_days = min(backtest_days, len(X) - 500)  # need 500+ for training
+    eval_days = min(backtest_days, len(X) - MIN_TRAINING_SAMPLES)
     wf_origin = len(X) - eval_days  # first train/test split point
 
     from src.models.trainer import ModelTrainer
@@ -84,7 +90,7 @@ def run_backtest(backtest_days: int = 252, retrain_freq: int = 60, verbose: bool
         X_test_wf = X.iloc[wf_start:wf_end]
         y_test_wf = y.iloc[wf_start:wf_end]
 
-        if len(X_train_wf) < 500 or len(X_test_wf) == 0:
+        if len(X_train_wf) < MIN_TRAINING_SAMPLES or len(X_test_wf) == 0:
             continue
 
         n_windows += 1
@@ -116,7 +122,7 @@ def run_backtest(backtest_days: int = 252, retrain_freq: int = 60, verbose: bool
         for i, date in enumerate(X_test_wf.index):
             prob = float(cal_probs[i])
             actual = int(y_test_wf.iloc[i])
-            predicted = 1 if prob >= 0.5 else 0
+            predicted = 1 if prob >= DECISION_THRESHOLD else 0
             if predicted == actual:
                 window_correct += 1
             all_predictions.append({
@@ -205,8 +211,8 @@ def run_backtest(backtest_days: int = 252, retrain_freq: int = 60, verbose: bool
     nasdaq_prices = spy_test[close_col]
     try:
         spy_data = get_spy_data()
-        spy_prices = spy_data["Adj Close"] if "Adj Close" in spy_data.columns else spy_data["Close"]
-    except Exception as e:
+        spy_prices = spy_data[get_close_col(spy_data)]
+    except (RuntimeError, ValueError, KeyError) as e:
         log(f"   SPY 데이터 실패: {e}")
         spy_prices = nasdaq_prices * 0.4
 
@@ -267,8 +273,15 @@ def _make_portfolio_chart(port_df, benchmarks, initial=10000):
     return base64.b64encode(buf.read()).decode("utf-8")
 
 
+def _css_class(value, good=0.6, warn=0.5):
+    """Return CSS class based on metric value thresholds."""
+    if value >= good:
+        return "good"
+    return "warn" if value >= warn else "bad"
+
+
 def generate_html_report(df_results, metrics, spy_test, port_df, output_path):
-    """Generate enhanced HTML backtest report."""
+    """Generate enhanced HTML backtest report using template."""
     total = metrics["total"]
     accuracy = metrics["accuracy"]
     precision, recall, f1 = metrics["precision"], metrics["recall"], metrics["f1"]
@@ -292,46 +305,73 @@ def generate_html_report(df_results, metrics, spy_test, port_df, output_path):
             s = signal_stats[sn]
             signal_rows += f'<tr><td><span class="signal-badge {sn.lower().replace(" ","-")}">{sn}</span></td><td class="num">{s["count"]}일</td><td class="num">{s["avg_prob"]*100:.1f}%</td><td class="num">{s["actual_up_rate"]*100:.1f}%</td><td class="num">{s["avg_return"]:+.2f}%</td></tr>'
 
-    port_section = ""
-    if port_metrics:
-        chart_b64 = _make_portfolio_chart(port_df, benchmarks)
-        bm_rows = "".join(f'<tr><td>{n}</td><td class="num">${b["final_value"]:,.0f}</td><td class="num">{b["total_return"]*100:+.2f}%</td></tr>' for n, b in benchmarks.items())
-        tier_dist = port_metrics.get("tier_distribution", {})
-        tier_colors = {"Aggressive": "#ef5350", "Growth": "#4fc3f7", "Moderate": "#ffa726", "Cautious": "#888", "Defensive": "#666"}
-        tier_bars = "".join(f'<div style="display:flex;align-items:center;gap:8px;margin:4px 0"><span style="width:80px;font-size:12px;color:#aaa">{t}</span><div style="background:{tier_colors.get(t,"#888")};height:16px;width:{p*200}px;border-radius:3px"></div><span style="font-size:12px;color:#888">{p*100:.0f}%</span></div>' for t, p in sorted(tier_dist.items(), key=lambda x: x[1], reverse=True))
+    port_section = _build_portfolio_section(port_metrics, benchmarks, port_df)
 
-        port_section = f'''<div class="section"><h2>Portfolio Simulation (TQQQ/SPY Strategy)</h2>
-        <div class="metrics-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:16px">
-        <div class="metric-card"><div class="metric-value {"good" if port_metrics.get("total_return",0)>0 else "bad"}">{port_metrics.get("total_return",0)*100:+.2f}%</div><div class="metric-label">전략 수익률</div></div>
-        <div class="metric-card"><div class="metric-value bad">{port_metrics.get("max_drawdown",0)*100:.2f}%</div><div class="metric-label">MDD</div></div>
-        <div class="metric-card"><div class="metric-value {"good" if port_metrics.get("sharpe_ratio",0)>1 else "warn"}">{port_metrics.get("sharpe_ratio",0):.2f}</div><div class="metric-label">Sharpe</div></div>
-        <div class="metric-card"><div class="metric-value">{port_metrics.get("n_rebalances",0)}</div><div class="metric-label">리밸런싱</div></div></div>
-        {"<img src='data:image/png;base64," + chart_b64 + "' style='width:100%;border-radius:8px;margin-bottom:16px'>" if chart_b64 else ""}
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-        <div><h3 style="font-size:14px;color:#888;margin-bottom:8px">vs Benchmark</h3><table><thead><tr><th>Name</th><th style="text-align:right">최종가치</th><th style="text-align:right">수익률</th></tr></thead><tbody><tr><td><b>Strategy</b></td><td class="num"><b>${port_metrics.get("final_value",10000):,.0f}</b></td><td class="num"><b>{port_metrics.get("total_return",0)*100:+.2f}%</b></td></tr>{bm_rows}</tbody></table></div>
-        <div><h3 style="font-size:14px;color:#888;margin-bottom:8px">Tier 분포</h3>{tier_bars}</div></div></div>'''
-
-    html = f'''<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>NASDAQ Backtest Report</title>
-<style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1117;color:#e0e0e0;padding:24px;line-height:1.6}}.container{{max-width:1200px;margin:0 auto}}h1{{font-size:28px;font-weight:700;margin-bottom:4px;color:#fff}}.subtitle{{color:#888;font-size:14px;margin-bottom:32px}}.metrics-grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:32px}}.metric-card{{background:#1a1d27;border-radius:12px;padding:20px;text-align:center;border:1px solid #2a2d3a}}.metric-value{{font-size:36px;font-weight:700;color:#4fc3f7}}.metric-value.good{{color:#66bb6a}}.metric-value.warn{{color:#ffa726}}.metric-value.bad{{color:#ef5350}}.metric-label{{font-size:13px;color:#888;margin-top:4px}}.section{{background:#1a1d27;border-radius:12px;padding:24px;margin-bottom:24px;border:1px solid #2a2d3a}}.section h2{{font-size:18px;font-weight:600;margin-bottom:16px;color:#fff}}table{{width:100%;border-collapse:collapse;font-size:13px}}th{{text-align:left;padding:10px 12px;border-bottom:2px solid #2a2d3a;color:#888;font-weight:600;font-size:12px;text-transform:uppercase}}td{{padding:10px 12px;border-bottom:1px solid #1e2130}}td.num{{font-family:'SF Mono',Monaco,monospace;text-align:right}}td.prob{{text-align:center}}tr.correct{{background:rgba(102,187,106,0.05)}}tr.wrong{{background:rgba(239,83,80,0.05)}}.result-correct{{color:#66bb6a;font-weight:700;text-align:center}}.result-wrong{{color:#ef5350;font-weight:700;text-align:center}}.signal-badge{{display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600}}.signal-badge.strong-buy{{background:rgba(102,187,106,0.2);color:#66bb6a}}.signal-badge.buy{{background:rgba(79,195,247,0.2);color:#4fc3f7}}.signal-badge.neutral{{background:rgba(255,167,38,0.2);color:#ffa726}}.signal-badge.sell{{background:rgba(239,83,80,0.2);color:#ef5350}}.tier-badge{{display:inline-block;padding:1px 8px;border-radius:8px;font-size:11px}}.tier-badge.aggressive{{background:rgba(239,83,80,0.15);color:#ef5350}}.tier-badge.growth{{background:rgba(79,195,247,0.15);color:#4fc3f7}}.tier-badge.moderate{{background:rgba(255,167,38,0.15);color:#ffa726}}.tier-badge.cautious{{background:rgba(136,136,136,0.15);color:#aaa}}.tier-badge.defensive{{background:rgba(102,102,102,0.15);color:#888}}.confusion-grid{{display:grid;grid-template-columns:auto 1fr 1fr;gap:0;max-width:360px;margin:0 auto}}.confusion-cell{{padding:16px;text-align:center;font-size:14px}}.confusion-header{{padding:12px;text-align:center;font-size:12px;color:#888;font-weight:600}}.confusion-tp{{background:rgba(102,187,106,0.15);color:#66bb6a;font-weight:700;font-size:24px;border-radius:8px 0 0 0}}.confusion-fp{{background:rgba(239,83,80,0.08);color:#ef5350;font-size:24px;border-radius:0 8px 0 0}}.confusion-fn{{background:rgba(239,83,80,0.08);color:#ef5350;font-size:24px;border-radius:0 0 0 8px}}.confusion-tn{{background:rgba(102,187,106,0.15);color:#66bb6a;font-weight:700;font-size:24px;border-radius:0 0 8px 0}}.confusion-label{{font-size:11px;color:#888;display:block;margin-top:4px}}.footer{{text-align:center;color:#555;font-size:12px;margin-top:32px;padding-top:16px;border-top:1px solid #1e2130}}</style></head><body>
-<div class="container">
-<h1>NASDAQ Backtest Report</h1>
-<div class="subtitle">{date_from} ~ {date_to} | {total}거래일 | Target: {lookahead}일 후 상승 여부 | Calibrated + Feature Selection | {datetime.now().strftime('%Y-%m-%d %H:%M')}</div>
-<div class="metrics-grid">
-<div class="metric-card"><div class="metric-value {"good" if accuracy>=0.6 else "warn" if accuracy>=0.5 else "bad"}">{accuracy:.1%}</div><div class="metric-label">정확도 ({metrics["correct"]}/{total})</div></div>
-<div class="metric-card"><div class="metric-value {"good" if precision>=0.6 else "warn" if precision>=0.5 else "bad"}">{precision:.1%}</div><div class="metric-label">Precision</div></div>
-<div class="metric-card"><div class="metric-value {"good" if recall>=0.6 else "warn" if recall>=0.5 else "bad"}">{recall:.1%}</div><div class="metric-label">Recall</div></div>
-<div class="metric-card"><div class="metric-value {"good" if f1>=0.6 else "warn" if f1>=0.5 else "bad"}">{f1:.1%}</div><div class="metric-label">F1</div></div></div>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px">
-<div class="section"><h2>Confusion Matrix</h2><div class="confusion-grid"><div class="confusion-header"></div><div class="confusion-header">실제 상승</div><div class="confusion-header">실제 하락</div><div class="confusion-header" style="text-align:right;padding-right:16px">예측 상승</div><div class="confusion-cell confusion-tp">{tp}<span class="confusion-label">TP</span></div><div class="confusion-cell confusion-fp">{fp}<span class="confusion-label">FP</span></div><div class="confusion-header" style="text-align:right;padding-right:16px">예측 하락</div><div class="confusion-cell confusion-fn">{fn}<span class="confusion-label">FN</span></div><div class="confusion-cell confusion-tn">{tn}<span class="confusion-label">TN</span></div></div></div>
-<div class="section"><h2>Signal Analysis</h2><table><thead><tr><th>Signal</th><th style="text-align:right">빈도</th><th style="text-align:right">평균 확률</th><th style="text-align:right">실제 상승률</th><th style="text-align:right">평균 수익률</th></tr></thead><tbody>{signal_rows}</tbody></table></div></div>
-{port_section}
-<div class="section"><h2>Daily Predictions</h2><table><thead><tr><th>날짜</th><th style="text-align:right">종가</th><th style="text-align:right">{lookahead}일후</th><th style="text-align:right">수익률</th><th style="text-align:center">확률</th><th>Signal</th><th>실제</th><th style="text-align:center">적중</th><th>Tier</th></tr></thead><tbody>{daily_rows}</tbody></table></div>
-<div class="footer">NASDAQ Backtest | LightGBM + Calibration + Feature Selection | {lookahead}-day target | TQQQ/SPY Strategy</div>
-</div></body></html>'''
+    template = load_template("backtest_report.html")
+    html = template.safe_substitute(
+        subtitle=f"{date_from} ~ {date_to} | {total}거래일 | Target: {lookahead}일 후 상승 여부 | Calibrated + Feature Selection | {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        accuracy_class=_css_class(accuracy),
+        accuracy_pct=f"{accuracy:.1%}",
+        correct=metrics["correct"],
+        total=total,
+        precision_class=_css_class(precision),
+        precision_pct=f"{precision:.1%}",
+        recall_class=_css_class(recall),
+        recall_pct=f"{recall:.1%}",
+        f1_class=_css_class(f1),
+        f1_pct=f"{f1:.1%}",
+        tp=tp, fp=fp, fn=fn, tn=tn,
+        signal_rows=signal_rows,
+        port_section=port_section,
+        daily_rows=daily_rows,
+        lookahead=lookahead,
+    )
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
     return output_path
+
+
+def _build_portfolio_section(port_metrics, benchmarks, port_df):
+    """Build portfolio simulation HTML section."""
+    if not port_metrics:
+        return ""
+
+    chart_b64 = _make_portfolio_chart(port_df, benchmarks)
+    bm_rows = "".join(
+        f'<tr><td>{n}</td><td class="num">${b["final_value"]:,.0f}</td>'
+        f'<td class="num">{b["total_return"]*100:+.2f}%</td></tr>'
+        for n, b in benchmarks.items()
+    )
+    tier_dist = port_metrics.get("tier_distribution", {})
+    tier_colors = {"Aggressive": "#ef5350", "Growth": "#4fc3f7", "Moderate": "#ffa726", "Cautious": "#888", "Defensive": "#666"}
+    tier_bars = "".join(
+        f'<div style="display:flex;align-items:center;gap:8px;margin:4px 0">'
+        f'<span style="width:80px;font-size:12px;color:#aaa">{t}</span>'
+        f'<div style="background:{tier_colors.get(t,"#888")};height:16px;width:{p*200}px;border-radius:3px"></div>'
+        f'<span style="font-size:12px;color:#888">{p*100:.0f}%</span></div>'
+        for t, p in sorted(tier_dist.items(), key=lambda x: x[1], reverse=True)
+    )
+
+    ret_class = "good" if port_metrics.get("total_return", 0) > 0 else "bad"
+    sharpe_class = "good" if port_metrics.get("sharpe_ratio", 0) > 1 else "warn"
+    chart_img = f"<img src='data:image/png;base64,{chart_b64}' style='width:100%;border-radius:8px;margin-bottom:16px'>" if chart_b64 else ""
+
+    return (
+        f'<div class="section"><h2>Portfolio Simulation (TQQQ/SPY Strategy)</h2>'
+        f'<div class="metrics-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:16px">'
+        f'<div class="metric-card"><div class="metric-value {ret_class}">{port_metrics.get("total_return",0)*100:+.2f}%</div><div class="metric-label">전략 수익률</div></div>'
+        f'<div class="metric-card"><div class="metric-value bad">{port_metrics.get("max_drawdown",0)*100:.2f}%</div><div class="metric-label">MDD</div></div>'
+        f'<div class="metric-card"><div class="metric-value {sharpe_class}">{port_metrics.get("sharpe_ratio",0):.2f}</div><div class="metric-label">Sharpe</div></div>'
+        f'<div class="metric-card"><div class="metric-value">{port_metrics.get("n_rebalances",0)}</div><div class="metric-label">리밸런싱</div></div></div>'
+        f'{chart_img}'
+        f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">'
+        f'<div><h3 style="font-size:14px;color:#888;margin-bottom:8px">vs Benchmark</h3>'
+        f'<table><thead><tr><th>Name</th><th style="text-align:right">최종가치</th><th style="text-align:right">수익률</th></tr></thead>'
+        f'<tbody><tr><td><b>Strategy</b></td><td class="num"><b>${port_metrics.get("final_value",10000):,.0f}</b></td>'
+        f'<td class="num"><b>{port_metrics.get("total_return",0)*100:+.2f}%</b></td></tr>{bm_rows}</tbody></table></div>'
+        f'<div><h3 style="font-size:14px;color:#888;margin-bottom:8px">Tier 분포</h3>{tier_bars}</div></div></div>'
+    )
 
 
 def main():
@@ -340,15 +380,15 @@ def main():
     parser.add_argument("--days", type=int, default=252, help="Evaluation period in trading days")
     parser.add_argument("--retrain-freq", type=int, default=60, help="Retrain every N trading days")
     args = parser.parse_args()
-    print("=" * 60)
-    print(f"  NASDAQ Backtest - {args.days}거래일 Expanding WF (retrain={args.retrain_freq}일)")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("  NASDAQ Backtest - %d거래일 Expanding WF (retrain=%d일)", args.days, args.retrain_freq)
+    logger.info("=" * 60)
     df_results, metrics, spy_test, port_df = run_backtest(
         backtest_days=args.days, retrain_freq=args.retrain_freq,
     )
     output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_report.html")
     generate_html_report(df_results, metrics, spy_test, port_df, output_path)
-    print(f"\nHTML 리포트 생성 완료: {output_path}")
+    logger.info("HTML 리포트 생성 완료: %s", output_path)
 
 
 if __name__ == "__main__":

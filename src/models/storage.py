@@ -9,7 +9,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from src.config import MODEL_DIR, SMA_CACHE_DIR
+from src.config import MODEL_DIR, SMA_CACHE_DIR, get_logger
+
+logger = get_logger(__name__)
 
 
 RELEASE_TAG = "model-latest"
@@ -60,13 +62,13 @@ def upload_artifacts(verbose: bool = True):
 
     if not files_to_upload:
         if verbose:
-            print("WARNING: No artifacts found to upload.")
+            logger.warning("No artifacts found to upload.")
         return
 
     if verbose:
-        print(f"Uploading {len(files_to_upload)} files to release '{RELEASE_TAG}':")
+        logger.info("Uploading %d files to release '%s':", len(files_to_upload), RELEASE_TAG)
         for f in files_to_upload:
-            print(f"  {Path(f).name}")
+            logger.info("  %s", Path(f).name)
 
     # gh release upload --clobber overwrites existing assets
     # "--" prevents file paths from being parsed as CLI options
@@ -76,7 +78,7 @@ def upload_artifacts(verbose: bool = True):
     ] + files_to_upload)
 
     if verbose:
-        print("Upload complete.")
+        logger.info("Upload complete.")
 
 
 def download_artifacts(verbose: bool = True):
@@ -103,9 +105,9 @@ def download_artifacts(verbose: bool = True):
 
     asset_names = [a["name"] for a in assets]
     if verbose:
-        print(f"Found {len(asset_names)} assets in release '{RELEASE_TAG}':")
+        logger.info("Found %d assets in release '%s':", len(asset_names), RELEASE_TAG)
         for name in asset_names:
-            print(f"  {name}")
+            logger.info("  %s", name)
 
     # Download all assets to a temp dir, then move to correct locations
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -119,7 +121,7 @@ def download_artifacts(verbose: bool = True):
             safe_name = os.path.basename(fname)
             if safe_name != fname or ".." in fname:
                 if verbose:
-                    print(f"  SKIPPED (unsafe name): {fname}")
+                    logger.warning("SKIPPED (unsafe name): %s", fname)
                 continue
 
             src = os.path.join(tmpdir, safe_name)
@@ -134,15 +136,15 @@ def download_artifacts(verbose: bool = True):
             if not (dst_resolved.is_relative_to(MODEL_DIR.resolve()) or
                     dst_resolved.is_relative_to(SMA_CACHE_DIR.resolve())):
                 if verbose:
-                    print(f"  SKIPPED (path traversal): {fname}")
+                    logger.warning("SKIPPED (path traversal): %s", fname)
                 continue
 
             shutil.copy2(src, dst)
             if verbose:
-                print(f"  Saved: {dst}")
+                logger.info("Saved: %s", dst)
 
     if verbose:
-        print("Download complete.")
+        logger.info("Download complete.")
 
 
 def main():

@@ -6,14 +6,17 @@ import sys
 import time
 from datetime import datetime
 
-from src.config import INDEX_CONFIGS, SMA_WINDOWS
+from src.config import INDEX_CONFIGS, SMA_WINDOWS, ENSEMBLE_ENABLED, get_logger
 from src.data.collectors import get_sp500_tickers, SMACollector
 from src.data.features import DatasetBuilder
 from src.data.cache import SMACache
-from src.models.trainer import ModelTrainer
+from src.models.trainer import ModelTrainer, EnsembleTrainer
 
 
-def run_training(max_tickers: int = 500, verbose: bool = True):
+logger = get_logger(__name__)
+
+
+def run_training(max_tickers: int = 500, verbose: bool = True, ensemble: bool = False):
     """
     Full training pipeline:
     1. Collect S&P 500 SMA data
@@ -24,8 +27,7 @@ def run_training(max_tickers: int = 500, verbose: bool = True):
     start_time = time.time()
 
     def log(msg):
-        if verbose:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+        logger.info(msg)
 
     # ── Step 1: S&P 500 tickers ──
     log("Step 1/5: S&P 500 티커 리스트 수집")
@@ -61,22 +63,22 @@ def run_training(max_tickers: int = 500, verbose: bool = True):
         step_num = idx + 3
         log(f"Step {step_num}/5: [{index_name}] 데이터 준비 + 모델 학습")
 
+        use_ensemble = ensemble or ENSEMBLE_ENABLED
+
         try:
             # Build dataset
             ticker = cfg["ticker"]
             X, spy, y = builder.build(ticker, for_prediction=False)
             log(f"  데이터셋: {len(X)} samples, {len(X.columns)} features, Target=1 비율: {y.mean():.3f}")
 
-            # Train
+            # Train single model (always, for backward compatibility)
             trainer = ModelTrainer(index_name)
             result = trainer.train(
                 X, y,
                 status_callback=lambda msg: log(f"  {msg}") if verbose else None,
             )
-
-            # Save model
             model_path, meta_path = trainer.save()
-            log(f"  모델 저장: {model_path}")
+            log(f"  단일 모델 저장: {model_path}")
 
             metrics = result["metrics"]
             all_metrics[index_name] = {
@@ -86,6 +88,19 @@ def run_training(max_tickers: int = 500, verbose: bool = True):
                 "n_features": metrics["n_features"],
                 "top_features": list(result["feature_importance"].keys())[:10],
             }
+
+            # Train ensemble if enabled
+            if use_ensemble:
+                log(f"  [{index_name}] 앙상블 모델 학습 시작")
+                ens_trainer = EnsembleTrainer(index_name)
+                ens_result = ens_trainer.train(
+                    X, y,
+                    status_callback=lambda msg: log(f"  {msg}") if verbose else None,
+                )
+                ens_model_path, ens_meta_path = ens_trainer.save()
+                log(f"  앙상블 모델 저장: {ens_model_path}")
+                all_metrics[index_name]["ensemble_cv_score"] = ens_result["ensemble_cv_score"]
+                all_metrics[index_name]["ensemble_models"] = list(ens_result["models"].keys())
 
         except Exception as e:
             log(f"  ERROR [{index_name}]: {e}")
@@ -110,11 +125,13 @@ def main():
     parser = argparse.ArgumentParser(description="Weekly model training pipeline")
     parser.add_argument("--max-tickers", type=int, default=500, help="Max S&P 500 stocks to analyze")
     parser.add_argument("--quiet", action="store_true", help="Suppress output")
+    parser.add_argument("--ensemble", action="store_true", help="Train ensemble (LightGBM + XGBoost + CatBoost)")
     args = parser.parse_args()
 
     metrics, cache_path = run_training(
         max_tickers=args.max_tickers,
         verbose=not args.quiet,
+        ensemble=args.ensemble,
     )
 
     # Send Telegram notification if configured
@@ -131,7 +148,7 @@ def main():
                     summary_lines.append(f"  {name}: {m['cv_accuracy_mean']:.4f}")
             notifier.send_text("\n".join(summary_lines))
     except Exception as e:
-        print(f"Telegram notification failed: {e}")
+        logger.error("Telegram notification failed: %s", e)
 
 
 if __name__ == "__main__":

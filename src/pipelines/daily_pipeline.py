@@ -6,7 +6,11 @@ import sys
 import time
 from datetime import datetime, timezone, timedelta
 
-from src.config import INDEX_CONFIGS, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, META_LEARNER_ENABLED, DATA_DIR
+from src.config import (
+    INDEX_CONFIGS, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, META_LEARNER_ENABLED,
+    DATA_DIR, DEFAULT_PROBABILITY, ENSEMBLE_ENABLED, get_logger,
+)
+from src.data import get_close_col
 from src.data.collectors import get_index_data, SMACollector
 from src.data.features import DatasetBuilder
 from src.data.cache import SMACache
@@ -19,6 +23,9 @@ from src.notification.formatters import (
     format_5day_table,
     create_probability_chart,
 )
+
+
+logger = get_logger(__name__)
 
 
 def run_daily_prediction(verbose: bool = True):
@@ -34,17 +41,35 @@ def run_daily_prediction(verbose: bool = True):
     start_time = time.time()
 
     def log(msg):
-        if verbose:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+        logger.info(msg)
 
     # ── Step 1: Load models ──
     log("Step 1/6: 모델 로드")
-    predictor = IndexPredictor()
-    loaded = predictor.load_models()
+    ensemble_active = False
+    if ENSEMBLE_ENABLED:
+        try:
+            from src.models.predictor import EnsemblePredictor
+            predictor = EnsemblePredictor()
+            loaded = predictor.load_models()
+            if loaded:
+                ensemble_active = True
+                log(f"  앙상블 모델 로드 완료: {loaded}")
+            else:
+                log("  앙상블 모델 없음 → 단일 모델로 폴백")
+                predictor = IndexPredictor()
+                loaded = predictor.load_models()
+        except Exception as e:
+            log(f"  앙상블 로드 실패 ({e}) → 단일 모델로 폴백")
+            predictor = IndexPredictor()
+            loaded = predictor.load_models()
+    else:
+        predictor = IndexPredictor()
+        loaded = predictor.load_models()
+
     if not loaded:
         log("ERROR: 로드된 모델이 없습니다. 먼저 학습을 실행하세요.")
         sys.exit(1)
-    log(f"  로드 완료: {loaded}")
+    log(f"  로드 완료: {loaded} (앙상블: {'ON' if ensemble_active else 'OFF'})")
 
     # ── Step 2: Load SMA cache ──
     log("Step 2/6: SMA 캐시 로드")
@@ -96,7 +121,7 @@ def run_daily_prediction(verbose: bool = True):
                 prev_predictions[index_name] = prev_prob
 
             # Current price
-            close_col = "Adj Close" if "Adj Close" in spy.columns else "Close"
+            close_col = get_close_col(spy)
             current_prices[index_name] = float(spy[close_col].iloc[-1])
 
             # Indicators (from last row)
@@ -120,7 +145,7 @@ def run_daily_prediction(verbose: bool = True):
             log(f"  [{index_name}] 확률: {prob*100:.1f}% → {signal_text}")
 
         except Exception as e:
-            log(f"  [{index_name}] ERROR: {e}")
+            logger.exception("[%s] 예측 중 오류 발생", index_name)
             continue
 
     if not predictions:
@@ -132,7 +157,7 @@ def run_daily_prediction(verbose: bool = True):
 
     # Use NASDAQ probability as primary signal for allocation
     primary_index = "NASDAQ"
-    primary_prob = predictions.get(primary_index, 0.5)
+    primary_prob = predictions.get(primary_index, DEFAULT_PROBABILITY)
 
     # Meta Learner: adjust probability with incremental learning
     meta_learner = None
@@ -204,14 +229,14 @@ def run_daily_prediction(verbose: bool = True):
             days=60,
         )
         log("  차트 이미지 생성 완료")
-    except Exception as e:
+    except (ValueError, KeyError, RuntimeError) as e:
         log(f"  차트 생성 실패: {e}")
 
     # 5-day table
     table_text = None
     try:
         table_text = format_5day_table(history=prob_histories)
-    except Exception as e:
+    except (ValueError, KeyError) as e:
         log(f"  5일 테이블 생성 실패: {e}")
 
     log("Step 6/6: Telegram 발송")
@@ -225,12 +250,11 @@ def run_daily_prediction(verbose: bool = True):
         log("  Telegram 발송 완료")
     else:
         log("  WARNING: Telegram 설정 없음 - 화면 출력만")
-        print("\n" + summary)
+        logger.info("\n%s", summary)
         if table_text:
-            # Strip HTML tags for console output
             import re
             clean = re.sub(r"<[^>]+>", "", table_text)
-            print("\n" + clean)
+            logger.info("\n%s", clean)
 
     # ── Step 6.5: Save prediction signal as JSON ──
     # 자동매매 시스템이 이 파일을 읽어서 매매 신호로 활용
@@ -241,7 +265,7 @@ def run_daily_prediction(verbose: bool = True):
         signal_text, _ = IndexPredictor.get_signal(primary_prob)
         prev_prob_value = prev_predictions.get(primary_index)
 
-        signal_data = {
+        signal_data: dict = {
             "date": now_kst.strftime("%Y-%m-%d"),
             "timestamp": now_kst.isoformat(),
             "probability": round(primary_prob, 4),
@@ -262,14 +286,57 @@ def run_daily_prediction(verbose: bool = True):
             "regime": allocation.regime_label,
             "prev_probability": round(prev_prob_value, 4) if prev_prob_value is not None else None,
             "meta_learner_adjusted": META_LEARNER_ENABLED and meta_learner is not None,
+            "ensemble_active": ensemble_active,
         }
 
         signal_path = DATA_DIR / "prediction_signal.json"
         signal_path.parent.mkdir(parents=True, exist_ok=True)
         signal_path.write_text(json.dumps(signal_data, indent=2, ensure_ascii=False), encoding="utf-8")
         log(f"  Signal JSON 저장 완료: {signal_path}")
-    except Exception as e:
+    except (OSError, TypeError, ValueError) as e:
         log(f"  Signal JSON 저장 실패: {e}")
+
+    # ── Step 6.6: Persist probability history CSV (for dashboard) ──
+    try:
+        import pandas as pd
+
+        prob_history_path = DATA_DIR / "probability_history.csv"
+        today_str = signal_data["date"]
+        new_row = {
+            "date": today_str,
+            "probability": signal_data["probability"],
+            "signal": signal_data["signal"],
+            "tier": signal_data["tier"],
+            "tqqq_weight": signal_data["allocation"]["tqqq"],
+            "spy_weight": signal_data["allocation"]["splg"],
+            "cash_weight": signal_data["allocation"]["cash"],
+            "vix": signal_data["indicators"]["vix"],
+            "rsi": signal_data["indicators"]["rsi"],
+            "adx": signal_data["indicators"]["adx"],
+        }
+
+        if prob_history_path.exists():
+            hist_df = pd.read_csv(prob_history_path)
+            hist_df = hist_df[hist_df["date"] != today_str]  # remove duplicate
+        else:
+            hist_df = pd.DataFrame()
+
+        hist_df = pd.concat([hist_df, pd.DataFrame([new_row])], ignore_index=True)
+        hist_df = hist_df.tail(500)  # keep last 500 days
+        hist_df.to_csv(prob_history_path, index=False)
+        log(f"  확률 히스토리 저장: {prob_history_path} ({len(hist_df)}일)")
+    except Exception as e:
+        log(f"  확률 히스토리 저장 실패: {e}")
+
+    # ── Step 6.7: Append predictions JSONL log ──
+    try:
+        predictions_log_path = DATA_DIR / "predictions_log.jsonl"
+        predictions_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(predictions_log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(signal_data, ensure_ascii=False) + "\n")
+        log(f"  예측 로그 append: {predictions_log_path}")
+    except Exception as e:
+        log(f"  예측 로그 저장 실패: {e}")
 
     elapsed = time.time() - start_time
     log(f"\n완료 (소요 시간: {elapsed:.1f}초)")
