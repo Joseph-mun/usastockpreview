@@ -91,6 +91,10 @@ def format_daily_summary(
                 lines.append(f"  Rebalance: NO ({reason})")
         lines.append("")
 
+    # Dashboard link
+    lines.append("\U0001f4ca <a href='https://usastockpreview.streamlit.app'>Dashboard</a>")
+    lines.append("")
+
     # Indicators
     lines.append("\u2501" * 20)
     if indicators:
